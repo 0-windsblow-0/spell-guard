@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77.0.3", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spellguard"
+version = "0.2.0a1"
+description = "Keep temporary workarounds from becoming permanent architecture"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = [
+    "tree-sitter==0.26.0",
+    "tree-sitter-go==0.25.0",
+    "tree-sitter-javascript==0.25.0",
+    "tree-sitter-typescript==0.23.2",
+    "tree-sitter-java==0.23.5",
+    "tree-sitter-c==0.24.2",
+    "tree-sitter-cpp==0.23.4",
+]
+
+[project.scripts]
+spellguard = "spellguard.cli:main"
+
+[tool.setuptools.package-data]
+spellguard = ["assist_prompt.md"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

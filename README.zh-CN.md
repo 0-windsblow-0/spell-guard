@@ -56,6 +56,26 @@ OPEN → 新外部调用 → VIOLATED → 移除调用 → OPEN
 
 ## 工作方式
 
+### 在 AI 会话中标记临时妥协
+
+和 AI 编码 Agent 协作时，Agent 若明确引入临时兼容方案，可通过 `spellguard propose` 先草拟一份提案，而不是等你手写规则：
+
+先运行一次 `spellguard instructions`，即可得到可加入 Agent 仓库指令的宿主无关说明。Spellguard 不会替你修改这些指令文件。
+
+```bash
+spellguard propose --path src/demo/adapt.py --symbol adapt --source-root src \
+  --reason "迁移期间临时保留" --desired-state "迁移后移除"
+```
+
+提案只存在 Git metadata 中，`check` 不会采纳。`propose` 会打印摘要与你必须看到的摘要 digest。只有你明确确认后，Agent 才执行：
+
+```bash
+spellguard confirm --proposal-sha256 <你看到的 digest>
+```
+
+摘要不匹配、草案被改或已有正式 registry 时，`confirm` 退出 2 且不改任何状态。确认是人类决定，Agent 绝不能自我确认。若已安装持久 hook，完成后需用新 digest 重新配置。
+
+
 1. 确认一个临时函数及其 `no_external_callers` 约束。
 2. 在代码变化时运行 `spellguard check`。
 3. 查看具体调用证据，决定保持隔离、接受依赖，还是移除依赖。

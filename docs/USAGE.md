@@ -93,6 +93,40 @@ Known callers are preserved alongside unknowns. An unavailable baseline makes th
 
 These are intentionally narrow static identities. Related ambiguous imports, function-value passing, dynamic dispatch, reflection, macros, and runtime-only consumers are not treated as definite callers; depending on the language and syntax, Spellguard either reports an incomplete result or leaves the reference outside its declared coverage.
 
+### Propose and confirm a temporary rule with an AI agent
+
+When an AI assistant deliberately introduces a temporary compatibility
+compromise, it may draft a proposal instead of asking you to hand-write the
+rule:
+
+Print the host-neutral instruction block once and add it to the repository
+instructions used by your Agent:
+
+```bash
+spellguard instructions
+```
+
+Spellguard does not edit AGENTS.md, CLAUDE.md, or host configuration itself.
+
+```bash
+spellguard propose --path src/demo/adapt.py --symbol adapt \
+  --source-root src --reason "temporary while migrating" \
+  --desired-state "remove after migration"
+```
+
+A proposal is stored only in Git metadata, so `check` and `context` still
+ignore it. The command prints a human-readable summary and the digest you
+must see. Only after you explicitly approve does the assistant run:
+
+```bash
+spellguard confirm --proposal-sha256 <the digest you saw>
+```
+
+`confirm` fails (exit 2) if the digest is wrong, the draft changed, or a
+registry already exists. To confirm is a human decision; the assistant must
+never self-confirm. If you use a persistent Agent hook, enable it with the
+new digest printed by `confirm`.
+
 ## Agent integration
 
 The source distribution includes three manual adapters. Keep the scripts together: Claude Code and Cursor reuse the core in the Codex script.

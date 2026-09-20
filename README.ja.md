@@ -56,6 +56,26 @@ OPEN → 新しい外部呼び出し → VIOLATED → 呼び出しを削除 → 
 
 ## 仕組み
 
+### AI セッションでの一時的な妥協のマーク
+
+AI エージェントが一時的な互換対応を意図的に導入した場合、規則を手書きで待つ代わりに `spellguard propose` で草案を出せます：
+
+最初に `spellguard instructions` を一度実行すると、Agent のリポジトリ指示へ追加できるホスト非依存の説明が表示されます。Spellguard がそれらの指示ファイルを自動編集することはありません。
+
+```bash
+spellguard propose --path src/demo/adapt.py --symbol adapt --source-root src \
+  --reason "移行中の一時対応" --desired-state "移行後に削除"
+```
+
+草案は Git metadata のみに保存され、`check` は採用しません。出力された要約と digest をあなたが確認し、明示的に承認した場合にのみ、エージェントは次を実行します：
+
+```bash
+spellguard confirm --proposal-sha256 <確認した digest>
+```
+
+digest 不一致、草案変更、既存 registry がある場合は `confirm` は exit 2 で何も変更しません。確認は人間の判断であり、エージェントが自己確認してはなりません。永続 hook を使っている場合は確認後に新しい digest で再設定してください。
+
+
 1. 一時的な関数と、その `no_external_callers` 制約を確認します。
 2. コードの変更時に `spellguard check` を実行します。
 3. 具体的な呼び出しの根拠を見て、独立性を保つか、依存を受け入れるか、削除するかを判断します。

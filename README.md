@@ -56,6 +56,33 @@ The synthetic demo runs locally and does not upload source code or call an LLM.
 
 ## How it works
 
+### Marking a temporary compromise in an AI session
+
+Working with an AI coding agent? When the agent deliberately introduces a
+temporary compatibility compromise, it can draft a proposal instead of
+waiting for you to hand-write a rule:
+
+Run `spellguard instructions` once to print the host-neutral instruction block
+you can add to your Agent's repository instructions. Spellguard does not edit
+those files for you.
+
+```bash
+spellguard propose --path src/demo/adapt.py --symbol adapt --source-root src \
+  --reason "temporary while migrating" --desired-state "remove after migration"
+```
+
+The proposal lives in Git metadata only and does not affect `check`. Only
+after you explicitly confirm does `spellguard confirm` promote it to the
+official registry:
+
+```bash
+spellguard confirm --proposal-sha256 <digest shown to you>
+```
+
+The agent asks; you confirm. Nothing is auto-confirmed.
+
+## Existing checks
+
 1. Confirm a temporary function and its `no_external_callers` constraint.
 2. Run `spellguard check` as the code changes.
 3. Review concrete caller evidence and decide whether to keep, accept, or remove the dependency.

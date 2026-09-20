@@ -58,6 +58,23 @@ def repository_root(root: Path) -> Path:
     return _repository_root(root)
 
 
+def git_dir(root: Path) -> Path:
+    """Return the resolved Git metadata directory for the repository.
+
+    Phase-0 marking keeps agent TEMP proposals inside this directory so they
+    never enter the work tree, the index, or exported snapshots. Works for
+    regular .git directories; nested worktrees are explicitly out of scope
+    for this entry (linked worktrees are an unsupported Phase-0 boundary).
+    """
+    candidate = Path(root).expanduser().resolve()
+    raw = _run_git(candidate, ["rev-parse", "--absolute-git-dir"])
+    resolved = Path(os.fsdecode(raw).strip()).resolve()
+    if not resolved.is_dir():
+        raise RepositoryError(
+            "Git metadata directory is not a directory: {}".format(resolved))
+    return resolved
+
+
 SUPPORTED_SUFFIXES = (".py", ".go", ".js", ".jsx", ".mjs",
                       ".ts", ".tsx", ".mts", ".java", ".c", ".h",
                       ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx")

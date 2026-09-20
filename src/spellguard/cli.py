@@ -83,6 +83,25 @@ def _parser() -> argparse.ArgumentParser:
     validate_parser.add_argument(
         "--registry-sha256", help="optional confirmed registry digest")
     validate_parser.add_argument("--format", choices=("json",), default="json")
+
+    propose = commands.add_parser(
+        "propose", help="draft an unconfirmed TEMP proposal (AI mark)")
+    propose.add_argument("--path", required=True)
+    propose.add_argument("--symbol", required=True)
+    propose.add_argument("--source-root", required=True)
+    propose.add_argument("--reason", required=True)
+    propose.add_argument("--desired-state", required=True)
+    propose.add_argument("--format", choices=("text", "json"), default="text")
+
+    confirm = commands.add_parser(
+        "confirm", help="promote the shown proposal to the real registry")
+    confirm.add_argument("--proposal-sha256", required=True)
+    confirm.add_argument("--format", choices=("text", "json"), default="text")
+
+    instructions_parser = commands.add_parser(
+        "instructions", help="host-independent marking rules")
+    instructions_parser.add_argument(
+        "--format", choices=("text", "json"), default="text")
     return parser
 
 
@@ -287,8 +306,72 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return demo_main()
     if args.command == "assist":
         return _assist(args)
+    if args.command == "propose":
+        return _propose(args)
+    if args.command == "confirm":
+        return _confirm(args)
+    if args.command == "instructions":
+        return _instructions(args.format if hasattr(args, "format") else "text")
     parser.print_usage(sys.stderr)
     return 2
+
+
+def _propose(args) -> int:
+    from .marking import propose_temporary
+    from .registry import RegistryError
+    from .repository import RepositoryError
+    try:
+        report = propose_temporary(
+            Path.cwd(), path=args.path, symbol=args.symbol,
+            source_root=args.source_root, reason=args.reason,
+            desired_state=args.desired_state)
+    except RegistryError as error:
+        return _emit_error(args.format, error.code, error.message)
+    except RepositoryError as error:
+        return _emit_error(args.format, "REPOSITORY_ERROR", str(error))
+    if args.format == "json":
+        sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    else:
+        sys.stdout.write(report["summary"] + "\n")
+        sys.stdout.write("digest: {} (confirmed: no)\n".format(
+            report["proposal_digest"]))
+        sys.stdout.write("next: spellguard confirm --proposal-sha256 {}\n".format(
+            report["proposal_digest"]))
+    return 0
+
+
+def _confirm(args) -> int:
+    from .marking import confirm_proposal
+    from .registry import RegistryError
+    from .repository import RepositoryError
+    try:
+        report = confirm_proposal(Path.cwd(), args.proposal_sha256)
+    except RegistryError as error:
+        return _emit_error(args.format, error.code, error.message)
+    except RepositoryError as error:
+        return _emit_error(args.format, "REPOSITORY_ERROR", str(error))
+    if args.format == "json":
+        sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    else:
+        sys.stdout.write("TEMP-001 confirmed with digest {}\n".format(
+            report["registry_digest"]))
+        if not report["proposal_cleaned"]:
+            sys.stdout.write(
+                "note: formal registry is confirmed; proposal cleanup is pending\n")
+        sys.stdout.write("next:\n  {}\n  {}\n".format(
+            report["next"][0], report["next"][1]))
+    return 0
+
+
+def _instructions(format_name: str) -> int:
+    from .marking import agent_instructions
+    if format_name == "json":
+        sys.stdout.write(json.dumps(
+            {"command": "instructions", "flag": False,
+             "instructions": agent_instructions()}, ensure_ascii=False) + "\n")
+    else:
+        sys.stdout.write(agent_instructions())
+    return 0
 
 
 def _assist(args) -> int:

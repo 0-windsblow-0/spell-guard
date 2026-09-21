@@ -680,5 +680,175 @@ class MainContractGoReplayTest(unittest.TestCase):
         self.assertEqual(third, {})
 
 
+def multi_report(results):
+    return {
+        "schema_version": 1, "command": "check", "registry_digest": "D",
+        "base_commit": "abc", "snapshot_identity": "snap",
+        "analysis_scope": "python-direct-calls-v1",
+        "complete": all(r.get("complete", True) for r in results),
+        "results": results, "diagnostics": [],
+    }
+
+
+def rule_result(rule_id, status, consumers=(), diagnostics=(), complete=True):
+    return {
+        "rule_id": rule_id, "status": status, "complete": complete,
+        "protected_symbol": {"path": "src/demo/workaround.py",
+                             "symbol": rule_id.lower(), "source_root": "src"},
+        "reason": "reason {}".format(rule_id), "desired_state": "remove",
+        "consumers": list(consumers), "added_consumers": None,
+        "diagnostics": list(diagnostics),
+    }
+
+
+class MultiRuleNotificationTest(unittest.TestCase):
+    """S-A05: per-rule dedup — unrelated registrations never re-notify a rule,
+    changed consumers/unknowns do, and status keeps the failure visible."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.state_dir = Path(self.tempdir.name).resolve() / "state"
+        self.repo = Path(self.tempdir.name).resolve() / "repo"
+        self.repo.mkdir()
+
+    def _record(self, report, failure=None):
+        return hook.record_outcome(
+            event="Stop", report=report, failure=failure,
+            state_dir=self.state_dir, repo_root=self.repo,
+            session_id="s", turn_id="t")
+
+    def _a(self, status="VIOLATED", consumers=None):
+        consumers = consumers if consumers is not None else [
+            {"path": "src/demo/use.py", "symbol": "run", "lines": [3]}]
+        return rule_result("TEMP-001", status, consumers=consumers)
+
+    def _b(self, status="OPEN", consumers=()):
+        return rule_result("TEMP-002", status, consumers=consumers)
+
+    def test_adding_and_closing_other_rule_does_not_renotify(self):
+        first = self._record(multi_report([self._a(), self._b()]))
+        self.assertTrue(first["notify"])
+        duplicate = self._record(multi_report([self._a(), self._b()]))
+        self.assertFalse(duplicate["notify"])
+        b_violated = rule_result("TEMP-002", "VIOLATED", consumers=[
+            {"path": "src/demo/other.py", "symbol": "call", "lines": [2]}])
+        second = self._record(multi_report([self._a(), b_violated]))
+        self.assertTrue(second["notify"])
+        message = second["output"]["systemMessage"]
+        self.assertIn("TEMP-002", message)
+        # closing B (RESOLVED) must not re-notify the untouched A
+        closed = self._record(multi_report([
+            self._a(), rule_result("TEMP-002", "RESOLVED")]))
+        self.assertFalse(closed["notify"])
+        self.assertEqual(closed["status"], "VIOLATED")
+
+    def test_unknown_other_rule_keeps_a_evidence(self):
+        first = self._record(multi_report([self._a()]))
+        self.assertTrue(first["notify"])
+        with_unknown = self._record(multi_report([
+            self._a(),
+            rule_result("TEMP-002", "UNVERIFIED", complete=False,
+                        diagnostics=[{"code": "SYMBOL_UNVERIFIED",
+                                      "message": "m", "path": "src/demo/x.py"}])]))
+        self.assertTrue(with_unknown["notify"])
+        self.assertIn("TEMP-002", with_unknown["output"]["systemMessage"])
+        self.assertEqual(with_unknown["status"], "VIOLATED")
+
+    def test_new_consumer_notifies_and_line_moves_do_not(self):
+        self._record(multi_report([self._a()]))
+        moved = self._record(multi_report([self._a(consumers=[
+            {"path": "src/demo/use.py", "symbol": "run", "lines": [99]}])]))
+        self.assertFalse(moved["notify"])
+        added = self._record(multi_report([self._a(consumers=[
+            {"path": "src/demo/use.py", "symbol": "run", "lines": [3]},
+            {"path": "src/demo/other.py", "symbol": "call", "lines": [1]}])]))
+        self.assertTrue(added["notify"])
+
+    def test_recovery_then_recurrence_renotifies(self):
+        self._record(multi_report([self._a()]))
+        recovered = self._record(multi_report([self._a("OPEN", consumers=())]))
+        self.assertFalse(recovered["notify"])
+        again = self._record(multi_report([self._a()]))
+        self.assertTrue(again["notify"])
+
+    def test_repeated_failure_is_deduped_but_status_stays_failed(self):
+        first = self._record(None, failure="subprocess timed out after 10s")
+        self.assertTrue(first["notify"])
+        second = self._record(None, failure="subprocess timed out after 10s")
+        self.assertFalse(second["notify"])
+        self.assertEqual(second["status"], "ERROR")
+        state = hook.load_state(self.state_dir)
+        self.assertEqual(state["last_status"], "ERROR")
+
+    def test_state_schema_migrates_explicitly(self):
+        self.state_dir.mkdir(parents=True)
+        (self.state_dir / "state.json").write_text(json.dumps({
+            "schema_version": 1, "last_key": "k", "last_status": "VIOLATED",
+            "last_checked_at": "2026-01-01T00:00:00"}))
+        state = hook.load_state(self.state_dir)
+        self.assertEqual(state["schema_version"], 2)
+        self.assertEqual(state["last_status"], "VIOLATED")
+        self.assertEqual(state["notified"], [])
+
+    def test_unknown_state_schema_is_not_treated_as_empty(self):
+        self.state_dir.mkdir(parents=True)
+        (self.state_dir / "state.json").write_text(json.dumps({
+            "schema_version": 3, "last_key": None, "last_status": None,
+            "last_checked_at": None, "notified": []}))
+        with self.assertRaises(hook.HookFailure):
+            hook.load_state(self.state_dir)
+
+
+class S04ContextTest(unittest.TestCase):
+    """S04: context lists every rule; a first unknown is visible, a repeat is
+    quiet, and the failure state stays queryable."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.state_dir = Path(self.tempdir.name).resolve() / "state"
+        self.repo = Path(self.tempdir.name).resolve() / "repo"
+        self.repo.mkdir()
+
+    def _record(self, report):
+        return hook.record_outcome(
+            event="Stop", report=report, failure=None,
+            state_dir=self.state_dir, repo_root=self.repo,
+            session_id="s", turn_id="t")
+
+    def test_user_prompt_submit_lists_all_rules(self):
+        rules = [{"id": "TEMP-001", "reason": "r", "desired_state": "d",
+                  "protected_symbol": {"path": "src/demo/a.py", "symbol": "a",
+                                       "source_root": "src"},
+                  "window": "no_external_callers"},
+                 {"id": "TEMP-002", "reason": "r", "desired_state": "d",
+                  "protected_symbol": {"path": "src/demo/b.py", "symbol": "b",
+                                       "source_root": "src"},
+                  "window": "no_external_callers"}]
+        report = {"schema_version": 1, "command": "context",
+                  "registry_digest": "D", "complete": True, "rules": rules,
+                  "diagnostics": []}
+        output = hook.hook_output("UserPromptSubmit", report, notify=False,
+                                  last_status=None)
+        context = output["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("2 temporary rules", context)
+        self.assertIn("TEMP-001", context)
+        self.assertIn("TEMP-002", context)
+
+    def test_unknown_first_visible_then_quiet_still_queryable(self):
+        unknown = rule_result(
+            "TEMP-002", "UNVERIFIED", complete=False,
+            diagnostics=[{"code": "SYMBOL_UNVERIFIED", "message": "m",
+                          "path": "src/demo/x.py"}])
+        first = self._record(multi_report([unknown]))
+        self.assertTrue(first["notify"])
+        second = self._record(multi_report([unknown]))
+        self.assertFalse(second["notify"])
+        self.assertEqual(second["status"], "UNVERIFIED")
+        state = hook.load_state(self.state_dir)
+        self.assertEqual(state["last_status"], "UNVERIFIED")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -57,12 +57,14 @@ def _parser() -> argparse.ArgumentParser:
     hook = commands.add_parser(
         "hook", help="single-host adapter (manual setup, reads stdin JSON)")
     hook.add_argument("--host", required=True, choices=("codex", "claude", "cursor"))
-    hook.add_argument("--repo", required=True,
+    hook.add_argument("--repo",
                       help="absolute repository root this installation protects")
-    hook.add_argument("--state-dir", required=True,
+    hook.add_argument("--state-dir",
                       help="absolute directory outside the repo for state")
-    hook.add_argument("--registry-sha256", required=True,
+    hook.add_argument("--registry-sha256",
                       help="registry digest confirmed at install time")
+    hook.add_argument("--installation-id",
+                      help="managed installation id (Codex only)")
 
     commands.add_parser("demo", help="synthetic end-to-end demo, self-cleaning")
 
@@ -86,17 +88,40 @@ def _parser() -> argparse.ArgumentParser:
 
     propose = commands.add_parser(
         "propose", help="draft an unconfirmed TEMP proposal (AI mark)")
-    propose.add_argument("--path", required=True)
-    propose.add_argument("--symbol", required=True)
-    propose.add_argument("--source-root", required=True)
-    propose.add_argument("--reason", required=True)
-    propose.add_argument("--desired-state", required=True)
+    propose.add_argument("--path")
+    propose.add_argument("--symbol")
+    propose.add_argument("--source-root")
+    propose.add_argument("--reason")
+    propose.add_argument("--desired-state")
+    propose.add_argument("--resolve", metavar="TEMP_ID",
+                         help="propose closing an existing TEMP")
+    propose.add_argument("--installation-id")
     propose.add_argument("--format", choices=("text", "json"), default="text")
 
     confirm = commands.add_parser(
         "confirm", help="promote the shown proposal to the real registry")
     confirm.add_argument("--proposal-sha256", required=True)
+    confirm.add_argument("--installation-id")
     confirm.add_argument("--format", choices=("text", "json"), default="text")
+
+    recover = commands.add_parser(
+        "recover", help="replay an interrupted managed confirmation")
+    recover.add_argument("--installation-id")
+    recover.add_argument("--format", choices=("text", "json"), default="text")
+
+    setup = commands.add_parser(
+        "setup", help="preview or apply the Codex hook installation")
+    setup.add_argument("--host", choices=("codex",), default="codex")
+    setup.add_argument("--apply", metavar="PLAN_DIGEST",
+                       help="apply exactly the plan with this digest")
+    setup.add_argument("--remove", action="store_true",
+                       help="preview removal of this installation")
+    setup.add_argument("--format", choices=("text", "json"), default="text")
+
+    status_parser = commands.add_parser(
+        "status", help="installation and check status")
+    status_parser.add_argument("--format", choices=("text", "json"),
+                               default="text")
 
     instructions_parser = commands.add_parser(
         "instructions", help="host-independent marking rules")
@@ -293,6 +318,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command == "context":
         return _context(args.format, _window_digest_argument(args.registry_sha256))
     if args.command == "hook":
+        if args.installation_id:
+            if args.host != "codex":
+                sys.stderr.write(
+                    "spellguard: error: managed hooks are Codex-only\n")
+                return 2
+            from .hook_core import main as hook_main
+            return hook_main(["--installation-id", args.installation_id])
+        if not (args.repo and args.state_dir and args.registry_sha256):
+            sys.stderr.write(
+                "spellguard: error: --repo, --state-dir and --registry-sha256 "
+                "are required without --installation-id\n")
+            return 2
         if args.host == "codex":
             from .hook_core import main as hook_main
         elif args.host == "claude":
@@ -310,48 +347,123 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _propose(args)
     if args.command == "confirm":
         return _confirm(args)
+    if args.command == "recover":
+        return _recover(args)
+    if args.command == "setup":
+        return _setup(args)
+    if args.command == "status":
+        return _status(args)
     if args.command == "instructions":
         return _instructions(args.format if hasattr(args, "format") else "text")
     parser.print_usage(sys.stderr)
     return 2
 
 
+_ADD_ARGUMENTS = (
+    ("--path", "path"), ("--symbol", "symbol"),
+    ("--source-root", "source_root"), ("--reason", "reason"),
+    ("--desired-state", "desired_state"),
+)
+
+
 def _propose(args) -> int:
-    from .marking import propose_temporary
     from .registry import RegistryError
     from .repository import RepositoryError
+    from .installation import InstallationError
     try:
-        report = propose_temporary(
-            Path.cwd(), path=args.path, symbol=args.symbol,
-            source_root=args.source_root, reason=args.reason,
-            desired_state=args.desired_state)
+        if args.installation_id:
+            from .confirmation import propose_change
+            if args.resolve:
+                operation = "resolve"
+                fields = {"rule_id": args.resolve, "reason": args.reason}
+            else:
+                operation = "add"
+                fields = {}
+                missing = []
+                for flag, name in _ADD_ARGUMENTS:
+                    value = getattr(args, name)
+                    if value:
+                        fields[name] = value
+                    else:
+                        missing.append(flag)
+                if missing:
+                    sys.stderr.write(
+                        "spellguard: error: {} required for a managed add\n"
+                        .format(", ".join(missing)))
+                    return 2
+            report = propose_change(Path.cwd(), args.installation_id,
+                                    operation=operation, rule_fields=fields)
+        else:
+            if args.resolve:
+                sys.stderr.write(
+                    "spellguard: error: --resolve requires --installation-id\n")
+                return 2
+            from .marking import propose_temporary
+            missing = [flag for flag, name in _ADD_ARGUMENTS
+                       if not getattr(args, name)]
+            if missing:
+                sys.stderr.write("spellguard: error: {} required\n".format(
+                    ", ".join(missing)))
+                return 2
+            report = propose_temporary(
+                Path.cwd(), path=args.path, symbol=args.symbol,
+                source_root=args.source_root, reason=args.reason,
+                desired_state=args.desired_state)
+    except InstallationError as error:
+        return _emit_error(args.format, error.code, error.message)
     except RegistryError as error:
         return _emit_error(args.format, error.code, error.message)
     except RepositoryError as error:
         return _emit_error(args.format, "REPOSITORY_ERROR", str(error))
     if args.format == "json":
         sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
-    else:
+    elif "summary" in report:
         sys.stdout.write(report["summary"] + "\n")
         sys.stdout.write("digest: {} (confirmed: no)\n".format(
             report["proposal_digest"]))
         sys.stdout.write("next: spellguard confirm --proposal-sha256 {}\n".format(
             report["proposal_digest"]))
+    else:
+        sys.stdout.write("{} proposal {}\n".format(
+            report["operation"], report["proposal_digest"]))
+        sys.stdout.write("target: {}\n".format(
+            json.dumps(report["rule"], ensure_ascii=False, sort_keys=True)))
+        sys.stdout.write("next: {}\n".format(report["next"]))
     return 0
 
 
 def _confirm(args) -> int:
-    from .marking import confirm_proposal
     from .registry import RegistryError
     from .repository import RepositoryError
+    from .installation import InstallationError
     try:
-        report = confirm_proposal(Path.cwd(), args.proposal_sha256)
+        if args.installation_id:
+            from .confirmation import confirm_change
+            report = confirm_change(Path.cwd(), args.installation_id,
+                                    args.proposal_sha256)
+        else:
+            from .marking import confirm_proposal
+            report = confirm_proposal(Path.cwd(), args.proposal_sha256)
+    except InstallationError as error:
+        return _emit_error(args.format, error.code, error.message)
     except RegistryError as error:
         return _emit_error(args.format, error.code, error.message)
     except RepositoryError as error:
         return _emit_error(args.format, "REPOSITORY_ERROR", str(error))
     if args.format == "json":
         sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    elif args.installation_id:
+        if report["recovery_required"]:
+            sys.stdout.write(
+                "约定已保存；确认记录清理待完成，可运行 spellguard recover 重试。\n")
+        elif not report["check_complete"]:
+            sys.stdout.write(
+                "约定已保存；当前对照未验证（check exit {}）；"
+                "这不代表安全。\n".format(report["check_exit_code"]))
+        else:
+            sys.stdout.write(
+                "约定已保存；当前对照已完成（check exit {}）。\n".format(
+                    report["check_exit_code"]))
     else:
         sys.stdout.write("TEMP-001 confirmed with digest {}\n".format(
             report["registry_digest"]))
@@ -361,6 +473,116 @@ def _confirm(args) -> int:
         sys.stdout.write("next:\n  {}\n  {}\n".format(
             report["next"][0], report["next"][1]))
     return 0
+
+
+def _recover(args) -> int:
+    from .repository import RepositoryError
+    from .installation import InstallationError, installation_identity
+    try:
+        installation_id = args.installation_id
+        if not installation_id:
+            installation_id, _root, _common = installation_identity(Path.cwd())
+        from .confirmation import recover_confirmation
+        report = recover_confirmation(Path.cwd(), installation_id)
+    except InstallationError as error:
+        return _emit_error(args.format, error.code, error.message)
+    except RepositoryError as error:
+        return _emit_error(args.format, "REPOSITORY_ERROR", str(error))
+    if args.format == "json":
+        sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    else:
+        sys.stdout.write("recovered: {}\n".format(
+            "yes" if report.get("recovered") else "no"))
+        if report.get("recovered"):
+            sys.stdout.write("check: exit {} complete={}\n".format(
+                report["check_exit_code"], report["check_complete"]))
+    return 0
+
+
+def _setup(args) -> int:
+    from .installation import InstallationError, apply_setup, plan_setup
+    from .repository import RepositoryError
+    root = Path.cwd()
+    try:
+        if args.apply:
+            report = apply_setup(root, args.apply)
+        else:
+            report = plan_setup(root, remove=args.remove)
+    except InstallationError as error:
+        return _emit_error(args.format, error.code, error.message)
+    except RepositoryError as error:
+        return _emit_error(args.format, "REPOSITORY_ERROR", str(error))
+    if args.format == "json":
+        sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    else:
+        sys.stdout.write(_render_setup(report))
+    return 0
+
+
+def _render_setup(report) -> str:
+    lines = ["spellguard setup ({})".format(report["operation"])]
+    if report.get("already_applied"):
+        lines.append("already applied; no changes")
+    for change in report.get("changes", []):
+        if change["action"] == "add_hook":
+            lines.append("add {} hook: {}".format(change["event"], change["command"]))
+        elif change["action"] == "remove_hook":
+            lines.append("remove {} hook".format(change["event"]))
+        else:
+            lines.append("{} {}".format(change["action"], change.get("file", "")))
+    if not report.get("already_applied"):
+        lines.append("plan digest: {}".format(report["plan_digest"]))
+    lines.append("host configuration: {}".format(report["config_path"]))
+    lines.append("registry: {} ({})".format(
+        report.get("registry_state"), report.get("registry_digest") or "none"))
+    lines.append("requires host trust: yes")
+    return "\n".join(lines) + "\n"
+
+
+def _status(args) -> int:
+    from .installation import InstallationError, installation_status
+    from .repository import RepositoryError
+    try:
+        report = installation_status(Path.cwd())
+    except InstallationError as error:
+        return _emit_error(args.format, error.code, error.message)
+    except RepositoryError as error:
+        return _emit_error(args.format, "REPOSITORY_ERROR", str(error))
+    if args.format == "json":
+        sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    else:
+        sys.stdout.write(_render_status(report))
+    return 0
+
+
+def _render_status(report) -> str:
+    lines = ["spellguard status"]
+    if not report.get("configured"):
+        if report.get("lifecycle") == "disabled":
+            lines.append("已停用：本仓库未接入 Hook；已确认约定与记录保留。")
+        else:
+            lines.append("未接入：尚未安装本工具的 Hook 条目。")
+    else:
+        lines.append("已接入：Hook 条目已写入；宿主事件尚未验证"
+                     "（host_verified=false，这不代表保护已生效）。")
+    registry_state = report.get("registry_state")
+    explanations = {
+        "absent": "尚无已确认约定；这不代表安全。",
+        "unbound": "存在登记文件，但尚未绑定本安装的已确认摘要。",
+        "bound": "登记与已确认摘要一致。",
+        "drifted": "登记与已确认摘要不一致（已漂移）；请重新确认。",
+        "unreadable": "登记读取失败；不能视为无登记，也不能视为安全。",
+    }
+    lines.append("registry[{}]: {}".format(
+        registry_state, explanations.get(
+            registry_state, "状态未知；不要据此判断安全。")))
+    if report.get("confirmation_pending"):
+        lines.append("确认待完成：Hook 不会采纳当前登记，可运行 "
+                     "spellguard recover。")
+    for diagnostic in report.get("diagnostics", []):
+        lines.append("diagnostic: {} ({})".format(
+            diagnostic["code"], diagnostic["message"]))
+    return "\n".join(lines) + "\n"
 
 
 def _instructions(format_name: str) -> int:

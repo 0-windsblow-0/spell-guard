@@ -301,11 +301,47 @@ def _locate_symbol(snapshot: Snapshot, rule: TemporaryRule
     return (_Symbol(path, module, protected.symbol, found[0].lineno), [])
 
 
+def _top_level_rebindings(tree: ast.Module, scopes: _Scopes) -> List[str]:
+    """Bound names re-assigned at module scope, in walk order (rule-independent)."""
+    rebound: List[str] = []
+    for stmt in ast.walk(tree):
+        if not isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            continue
+        if _import_context(scopes, stmt) != "top":
+            continue
+        rebound.extend(_bound_names_in_statement(stmt))
+    return rebound
+
+
 class _FileAnalysis:
-    def __init__(self, path: str, tree: ast.Module) -> None:
+    def __init__(self, path: str, tree: ast.Module,
+                 scopes: Optional[_Scopes] = None,
+                 nodes: Optional[List[ast.AST]] = None,
+                 duplicate_qualnames: Optional[Set[str]] = None,
+                 top_rebindings: Optional[List[str]] = None,
+                 imports: Optional[List[ast.AST]] = None,
+                 calls: Optional[List[ast.Call]] = None,
+                 names: Optional[List[ast.Name]] = None) -> None:
         self.path = path
         self.tree = tree
-        self.scopes = _Scopes(tree)
+        # Parse, scope construction and rule-independent AST walks may be
+        # reused across rules of one check (S03); bindings and diagnostics
+        # stay per rule.
+        self.scopes = scopes if scopes is not None else _Scopes(tree)
+        self.nodes = nodes if nodes is not None else list(ast.walk(tree))
+        self.duplicate_qualnames = (
+            duplicate_qualnames if duplicate_qualnames is not None
+            else _duplicate_qualnames(tree))
+        self.top_rebindings = (
+            top_rebindings if top_rebindings is not None
+            else _top_level_rebindings(tree, self.scopes))
+        self.imports = imports if imports is not None else [
+            node for node in self.nodes
+            if isinstance(node, (ast.Import, ast.ImportFrom))]
+        self.calls = calls if calls is not None else [
+            node for node in self.nodes if isinstance(node, ast.Call)]
+        self.names = names if names is not None else [
+            node for node in self.nodes if isinstance(node, ast.Name)]
         self.bindings: Dict[str, _Binding] = {}
         self.unsupported: List[str] = []
 
@@ -321,7 +357,7 @@ def _collect_bindings(analysis: _FileAnalysis, target_module: str,
     scopes = analysis.scopes
     package = _package_of(analysis.path, source_root)
 
-    for stmt in ast.walk(analysis.tree):
+    for stmt in analysis.imports:
         if isinstance(stmt, ast.Import):
             context = _import_context(scopes, stmt)
             for alias in stmt.names:
@@ -380,8 +416,8 @@ def _collect_bindings(analysis: _FileAnalysis, target_module: str,
 def _value_reference_name(analysis: _FileAnalysis, name: str) -> bool:
     """True when the binding is referenced as a value somewhere (not a direct
     call, not an import statement, not part of an attribute-chain call)."""
-    for node in ast.walk(analysis.tree):
-        if not isinstance(node, ast.Name) or node.id != name:
+    for node in analysis.names:
+        if node.id != name:
             continue
         parent = analysis.scopes.parents.get(node)
         if isinstance(parent, (ast.Import, ast.ImportFrom)):
@@ -448,9 +484,7 @@ def _call_name(call: ast.Call) -> Optional[str]:
 
 
 def _getattr_on_module(analysis: _FileAnalysis, module_bindings: Set[str]) -> bool:
-    for node in ast.walk(analysis.tree):
-        if not isinstance(node, ast.Call):
-            continue
+    for node in analysis.calls:
         if not (isinstance(node.func, ast.Name) and node.func.id == "getattr"):
             continue
         if node.args and isinstance(node.args[0], ast.Name) \
@@ -476,7 +510,8 @@ def _duplicate_qualnames(tree: ast.Module) -> Set[str]:
     return {name for name, count in counts.items() if count > 1}
 
 
-def check_window(snapshot: Snapshot, rule: TemporaryRule) -> WindowResult:
+def check_window(snapshot: Snapshot, rule: TemporaryRule, *,
+                 analyses_cache: Optional[Dict] = None) -> WindowResult:
     if rule.lifecycle == "RESOLVED":
         return WindowResult(rule.id, "RESOLVED", (), (), True)
 
@@ -505,17 +540,40 @@ def check_window(snapshot: Snapshot, rule: TemporaryRule) -> WindowResult:
         return check_cpp_window(snapshot, rule)
 
     files_by_path = {f.path: f for f in snapshot.files}
+    cache = analyses_cache if analyses_cache is not None else {}
     syntax_diagnostics: List[Diagnostic] = []
     analyses: Dict[str, _FileAnalysis] = {}
     for path in sorted(files_by_path):
         if not path.endswith(".py"):
             continue
-        try:
-            analyses[path] = _FileAnalysis(
-                path, _parse(path, files_by_path[path].content))
-        except _SyntaxFailure:
+        key = (path, files_by_path[path].digest)
+        if key in cache:
+            cached = cache[key]
+        else:
+            try:
+                tree = _parse(path, files_by_path[path].content)
+            except _SyntaxFailure:
+                cached = None
+            else:
+                scopes = _Scopes(tree)
+                nodes = list(ast.walk(tree))
+                cached = (tree, scopes, nodes,
+                          _duplicate_qualnames(tree),
+                          _top_level_rebindings(tree, scopes),
+                          [n for n in nodes
+                           if isinstance(n, (ast.Import, ast.ImportFrom))],
+                          [n for n in nodes if isinstance(n, ast.Call)],
+                          [n for n in nodes if isinstance(n, ast.Name)])
+            cache[key] = cached
+        if cached is None:
             syntax_diagnostics.append(Diagnostic(
                 "PYTHON_SYNTAX_ERROR", "file fails to parse", path))
+        else:
+            (tree, scopes, nodes, duplicates, top_rebinds, imports, calls,
+             names) = cached
+            analyses[path] = _FileAnalysis(
+                path, tree, scopes, nodes, duplicates, top_rebinds,
+                imports, calls, names)
 
     symbol, symbol_diagnostics = _locate_symbol(snapshot, rule)
     diagnostics: List[Diagnostic] = list(syntax_diagnostics) + list(symbol_diagnostics)
@@ -531,30 +589,17 @@ def check_window(snapshot: Snapshot, rule: TemporaryRule) -> WindowResult:
         analysis = analyses[path]
         _collect_bindings(analysis, symbol.module, symbol.name,
                           rule.protected_symbol.source_root)
-        rebound = set()
-        for stmt in ast.walk(analysis.tree):
-            if not isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-                continue
-            if _import_context(analysis.scopes, stmt) != "top":
-                continue
-            for name in _bound_names_in_statement(stmt):
-                if name in analysis.bindings:
-                    rebound.add(name)
-        rebound_by_file[path] = rebound
+        rebound_events = [name for name in analysis.top_rebindings
+                          if name in analysis.bindings]
+        rebound_by_file[path] = set(rebound_events)
         diagnostics.extend(
             Diagnostic("UNSUPPORTED_REFERENCE", message, path)
             for message in analysis.unsupported)
-        for stmt in ast.walk(analysis.tree):
-            if not isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-                continue
-            if _import_context(analysis.scopes, stmt) != "top":
-                continue
-            for name in _bound_names_in_statement(stmt):
-                if name in analysis.bindings:
-                    diagnostics.append(Diagnostic(
-                        "UNSUPPORTED_REFERENCE",
-                        "binding {} is re-assigned; reference uncertain".format(name),
-                        path))
+        for name in rebound_events:
+            diagnostics.append(Diagnostic(
+                "UNSUPPORTED_REFERENCE",
+                "binding {} is re-assigned; reference uncertain".format(name),
+                path))
         module_bindings = {name for name, binding in analysis.bindings.items()
                            if binding.attr is None}
         if _getattr_on_module(analysis, module_bindings):
@@ -568,10 +613,8 @@ def check_window(snapshot: Snapshot, rule: TemporaryRule) -> WindowResult:
                 "UNSUPPORTED_REFERENCE",
                 "binding {} is used as a value, not a direct call".format(name),
                 path))
-        for call in ast.walk(analysis.tree):
-            if not isinstance(call, ast.Call):
-                continue
-            rebound = rebound_by_file.get(analysis.path, set())
+        rebound = rebound_by_file[path]
+        for call in analysis.calls:
             if _call_name(call) in rebound:
                 continue
             match = _match_call(analysis, call, symbol)
@@ -580,9 +623,9 @@ def check_window(snapshot: Snapshot, rule: TemporaryRule) -> WindowResult:
             match_path, qualname, lineno = match
             keyed.setdefault((match_path, qualname), []).append(lineno)
 
-    duplicate_defs: Dict[str, Set[str]] = {}
-    for path, analysis in analyses.items():
-        duplicate_defs[path] = _duplicate_qualnames(analysis.tree)
+    duplicate_defs: Dict[str, Set[str]] = {
+        path: analysis.duplicate_qualnames
+        for path, analysis in analyses.items()}
 
     consumers: List[Consumer] = []
     for (path, qualname), lines in sorted(keyed.items()):

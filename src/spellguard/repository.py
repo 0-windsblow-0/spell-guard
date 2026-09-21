@@ -75,6 +75,28 @@ def git_dir(root: Path) -> Path:
     return resolved
 
 
+def git_common_dir(root: Path) -> Path:
+    """Return the resolved shared Git metadata directory.
+
+    For the main checkout this equals `git_dir`. A linked worktree reports a
+    different per-worktree metadata directory, which the S card uses to reject
+    linked worktrees without guessing from paths.
+    """
+    candidate = Path(root).expanduser().resolve()
+    raw = _run_git(candidate, ["rev-parse", "--git-common-dir"])
+    value = os.fsdecode(raw).strip()
+    if not value:
+        raise RepositoryError("Git returned an empty common directory")
+    resolved = Path(value)
+    if not resolved.is_absolute():
+        resolved = candidate / resolved
+    resolved = resolved.resolve()
+    if not resolved.is_dir():
+        raise RepositoryError(
+            "Git common directory is not a directory: {}".format(resolved))
+    return resolved
+
+
 SUPPORTED_SUFFIXES = (".py", ".go", ".js", ".jsx", ".mjs",
                       ".ts", ".tsx", ".mts", ".java", ".c", ".h",
                       ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx")

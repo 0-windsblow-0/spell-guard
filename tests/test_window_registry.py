@@ -194,11 +194,22 @@ class TestRegistry(unittest.TestCase):
             error = self.parse_error(json.dumps(changed).encode())
             error.message
 
-    def test_source_root_must_be_dot_or_src(self):
-        for value in ("lib", "/tmp", "", 3):
+    def test_source_root_must_be_plain_repo_relative_root(self):
+        for value in ("/tmp", "", 3):
             changed = copy.deepcopy(FIXTURE)
             changed["rules"][0]["protected_symbol"]["source_root"] = value
             self.parse_error(json.dumps(changed).encode())
+
+    def test_flat_python_file_under_source_root_is_valid(self):
+        changed = copy.deepcopy(FIXTURE)
+        changed["rules"][0]["protected_symbol"] = {
+            "path": "tools/renderer.py",
+            "symbol": "shot_duration",
+            "source_root": "tools",
+        }
+        registry = parse_registry(json.dumps(changed).encode())
+        self.assertEqual(
+            registry.rules[0].protected_symbol.source_root, "tools")
 
     def test_dot_source_root_requires_root_level_path(self):
         changed = copy.deepcopy(FIXTURE)
@@ -416,6 +427,65 @@ class TestReadRepositoryFile(unittest.TestCase):
         link.symlink_to(self.root)  # directory symlink
         with self.assertRaises(RegistryError):
             read_repository_file(self.root, "lib/mirror/secret.py", 1024)
+
+
+def _rule(number, lifecycle="ACTIVE", symbol=None):
+    return {
+        "id": "TEMP-{:03d}".format(number),
+        "classification": "temporary",
+        "lifecycle": lifecycle,
+        "reason": "Synthetic fixture: migration helper.",
+        "desired_state": "Synthetic fixture: remove after migration.",
+        "protected_symbol": {"path": "src/demo/workaround.py",
+                             "symbol": symbol or "fallback_{}".format(number),
+                             "source_root": "src"},
+        "window": "no_external_callers",
+        "resolution_reason": None if lifecycle == "ACTIVE" else "done",
+    }
+
+
+class MultiRuleRegistryTest(unittest.TestCase):
+    """S-A04: 0/1/2/8/9 rules, duplicate ID and duplicate ACTIVE identity."""
+
+    def parse(self, rules):
+        raw = json.dumps({"schema_version": 1, "rules": rules}).encode()
+        return parse_registry(raw)
+
+    def parse_error(self, rules):
+        with self.assertRaises(RegistryError) as ctx:
+            self.parse(rules)
+        self.assertEqual(ctx.exception.code, "REGISTRY_INVALID")
+        return ctx.exception
+
+    def test_zero_to_eight_rules_accepted(self):
+        for count in (0, 1, 2, 8):
+            with self.subTest(count=count):
+                registry = self.parse([_rule(i + 1) for i in range(count)])
+                self.assertEqual(len(registry.rules), count)
+
+    def test_nine_rules_rejected_without_dropping_old(self):
+        error = self.parse_error([_rule(i + 1) for i in range(9)])
+        self.assertIn("8", error.message)
+
+    def test_duplicate_rule_id_rejected(self):
+        rules = [_rule(1), _rule(1, symbol="other")]
+        self.parse_error(rules)
+
+    def test_duplicate_active_identity_rejected(self):
+        first = _rule(1, symbol="fallback")
+        second = _rule(2, symbol="fallback")
+        self.parse_error([first, second])
+
+    def test_active_and_resolved_for_same_symbol_allowed(self):
+        active = _rule(1, symbol="fallback")
+        resolved = _rule(2, lifecycle="RESOLVED", symbol="fallback")
+        registry = self.parse([active, resolved])
+        self.assertEqual([r.lifecycle for r in registry.rules],
+                         ["ACTIVE", "RESOLVED"])
+
+    def test_single_rule_digest_is_unchanged(self):
+        registry = self.parse([FIXTURE["rules"][0]])
+        self.assertEqual(registry.digest, VALID_DIGEST)
 
 
 if __name__ == "__main__":

@@ -102,6 +102,16 @@ class PackageEntryTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("--host", result.stdout + result.stderr)
 
+    def test_python_dash_m_spellguard_instructions_outside_repo(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "spellguard", "instructions"],
+            capture_output=True, text=True, timeout=20, cwd=self.tempdir.name,
+            env={**os.environ, "PYTHONPATH": str(
+                Path(__file__).resolve().parents[1] / "src")})
+        self.assertEqual(result.returncode, 0, result.stderr[-500:])
+        self.assertIn("installation-id", result.stdout)
+        self.assertIn("native project/hook trust", result.stdout)
+
     def test_python_dash_m_spellguard_demo_runs(self):
         result = subprocess.run(
             [sys.executable, "-m", "spellguard", "demo"],

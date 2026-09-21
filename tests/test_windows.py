@@ -53,6 +53,36 @@ def resolved_rule() -> Snapshot:
 
 
 class WindowContractTest(unittest.TestCase):
+    def test_flat_module_direct_caller_and_recovery(self):
+        fixture = json.loads(json.dumps(FIXTURE))
+        fixture["rules"][0]["protected_symbol"] = {
+            "path": "tools/legacy.py", "symbol": "fallback",
+            "source_root": "tools",
+        }
+        rule = parse_registry(json.dumps(fixture).encode()).rules[0]
+        files = {"tools/legacy.py": "def fallback():\n    return 0\n"}
+        self.assertEqual(check_window(snapshot_of(files), rule).status, "OPEN")
+        files["tools/test_legacy.py"] = (
+            "from legacy import fallback\n"
+            "def test_behavior():\n    return fallback()\n")
+        result = check_window(snapshot_of(files), rule)
+        self.assertEqual(result.status, "VIOLATED")
+        self.assertTrue(result.complete)
+        self.assertEqual(result.consumers,
+                         (Consumer("tools/test_legacy.py", "test_behavior", (3,)),))
+        files["tools/test_legacy.py"] = (
+            "from other import fallback\n"
+            "def test_behavior():\n    return fallback()\n")
+        result = check_window(snapshot_of(files), rule)
+        self.assertEqual(result.status, "OPEN")
+        self.assertTrue(result.complete)
+        files["tools/test_legacy.py"] = (
+            "from legacy import fallback\ncallbacks = [fallback]\n")
+        result = check_window(snapshot_of(files), rule)
+        self.assertEqual(result.status, "UNVERIFIED")
+        self.assertFalse(result.complete)
+        self.assertIn("UNSUPPORTED_REFERENCE", [d.code for d in result.diagnostics])
+
     def test_frozen_control_blocks_share_function_scope(self):
         for block in (
                 "if True:", "for item in (1,):", "while True:",

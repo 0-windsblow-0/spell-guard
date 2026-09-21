@@ -262,23 +262,60 @@ def confirm_proposal(root: Path, expected_digest: str) -> Dict:
     }
 
 
+def managed_agent_guidance() -> str:
+    """One short line injected through UserPromptSubmit additionalContext."""
+    return (
+        "Spellguard is installed for this repository. If you deliberately "
+        "introduce a temporary compromise, run `spellguard propose` with "
+        "--installation-id, show the maintainer the target, reason and end "
+        "state, and wait. Only after the maintainer explicitly confirms, run "
+        "confirm. Never confirm on your own; normally stay silent."
+    )
+
+
 def agent_instructions() -> str:
     return (
+        "Spellguard keeps already-confirmed temporary compromises from "
+        "silently spreading. These rules are for you, the coding agent; the "
+        "maintainer should only have to read intent in ordinary conversation.\n"
+        "\n"
+        "Authorization and host trust are separate: the maintainer's approval "
+        "of a specific intent is not the same as Codex's native project/hook "
+        "trust review. Never claim the host trust step has been removed.\n"
+        "\n"
         "When you, the coding agent, deliberately introduce a temporary "
-        "compatibility compromise in this session, run:\n"
+        "compatibility compromise in this session:\n"
         "\n"
-        "  spellguard propose --path <file> --symbol <name> "
-        "--source-root <root> --reason <why> --desired-state <when to remove>\n"
+        "1. Read the installation id yourself with `spellguard status "
+        "--format json` (never make the maintainer copy technical ids).\n"
+        "2. Draft the change with `spellguard propose` and --installation-id; "
+        "add the target path/symbol/source-root, the reason, and the end state "
+        "(or `--resolve TEMP_ID --reason ...` to close one).\n"
+        "3. Show the maintainer the object, the reason and the end state in "
+        "plain language, and wait. Do not show digests or file paths as the "
+        "thing they must judge.\n"
+        "4. Only after the maintainer explicitly confirms that specific "
+        "proposal, run `spellguard confirm --proposal-sha256 <digest> "
+        "--installation-id <id>`. The digest stays with you.\n"
+        "5. After confirmation, run the real check once and give a short "
+        "result. If the check is incomplete, say the agreement was saved but "
+        "the current comparison is unverified; do not commit, change the "
+        "baseline, or rebuild trust records yourself.\n"
         "\n"
-        "Show the maintainer the summary and the proposal digest, and wait. "
-        "Only after the maintainer explicitly confirms, run:\n"
+        "If the maintainer declines, is unsure, or does not answer, do not "
+        "register anything and do not ask again in the same turn. Never run "
+        "confirm without that explicit confirmation, never parse free text to "
+        "auto-confirm, never call a model to obtain confirmation, and never "
+        "invent host buttons. A proposal is not a CAND, a business claim, or a "
+        "confirmed rule.\n"
         "\n"
-        "  spellguard confirm --proposal-sha256 <digest they saw>\n"
-        "\n"
-        "Never run confirm without that explicit confirmation. A proposal is "
-        "not a CAND, a business claim, or a confirmed rule.\n"
+        "Reminders are static observations: report that a temporary function "
+        "gained a new external caller and ask whether to keep it isolated or "
+        "explicitly close it; do not assert a business defect. Nothing to "
+        "report means no user-visible output at all. Query with `spellguard "
+        "status`; disable with `spellguard setup --remove`.\n"
     )
 
 
 __all__ = ["propose_temporary", "confirm_proposal", "agent_instructions",
-           "proposal_digest_of"]
+           "managed_agent_guidance", "proposal_digest_of"]

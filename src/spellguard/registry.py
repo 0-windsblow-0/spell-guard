@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Tuple
 
 REGISTRY_MAX_BYTES = 64 * 1024
-MAX_RULES = 1
+MAX_RULES = 8
 
 SUPPORTED_SOURCE_ROOTS = (".", "src")
 
@@ -115,12 +115,19 @@ def parse_registry(raw: bytes) -> Registry:
     if not isinstance(rules_raw, list):
         raise _invalid("rules must be a list")
     if len(rules_raw) > MAX_RULES:
-        raise _invalid("only one TEMP rule is supported")
+        raise _invalid("at most {} TEMP rules are supported".format(MAX_RULES))
     rules: Tuple[TemporaryRule, ...] = tuple(
         _rule(r, index) for index, r in enumerate(rules_raw))
     ids = [r.id for r in rules]
     if len(set(ids)) != len(ids):
         raise _invalid("duplicate rule id")
+    active_symbols = [
+        (r.protected_symbol.path, r.protected_symbol.symbol,
+         r.protected_symbol.source_root)
+        for r in rules if r.lifecycle == "ACTIVE"
+    ]
+    if len(set(active_symbols)) != len(active_symbols):
+        raise _invalid("duplicate ACTIVE registration for the same protected symbol")
     return Registry(rules=rules, digest=_digest(schema))
 
 
@@ -215,14 +222,16 @@ def _protected_symbol(raw: dict, where: str) -> ProtectedSymbol:
                 "{} with source_root '.', path must be a single repo-relative file".format(where))
         normalized = normalized
     else:
-        # Generic repo-relative package roots (src, backend, ...): the path
-        # must lie inside source_root. A single file directly inside
-        # source_root is allowed for Go (module root = source root).
+        # Generic repo-relative source roots (src, tools, backend, ...): the
+        # path must lie inside source_root. Python also permits a flat module
+        # directly under the root; package ancestry is checked by the Python
+        # window only when the path has nested package components.
         if candidate.parts[0] != source_root:
             raise _invalid("{} path must lie inside source_root".format(where))
         relative = candidate.parts[1:]
         if len(relative) < 2 and (
-                candidate.suffix not in (".go",) + (".js", ".jsx", ".mjs", ".ts", ".tsx", ".mts")):
+                candidate.suffix not in (".py", ".go") +
+                (".js", ".jsx", ".mjs", ".ts", ".tsx", ".mts")):
             raise _invalid("{} definition must live in a package under source_root".format(where))
         normalized = PurePosixPath(*relative)
     is_go = normalized.suffix == ".go"

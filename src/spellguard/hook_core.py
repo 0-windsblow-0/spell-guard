@@ -21,8 +21,10 @@ from typing import Dict, List, Optional, Tuple
 
 CHECK_TIMEOUT_SECONDS = 10
 LOCK_WAIT_SECONDS = 1.0
-STATE_SCHEMA = 1
+STATE_SCHEMA = 2
+LEGACY_STATE_SCHEMA = 1
 STATUSES = {"OPEN", "VIOLATED", "UNVERIFIED", "RESOLVED", "ERROR"}
+NOTIFIABLE_STATUSES = {"VIOLATED", "UNVERIFIED"}
 
 
 class HookFailure(Exception):
@@ -56,6 +58,69 @@ def notification_key(report: Optional[Dict], failure: Optional[str] = None,
                                     separators=(",", ":")).encode()).hexdigest()
 
 
+def _rule_identity(result: Dict) -> Dict:
+    symbol = result.get("protected_symbol") or {}
+    return {
+        "rule_id": result.get("rule_id"),
+        "protected_symbol": {
+            "path": symbol.get("path"),
+            "symbol": symbol.get("symbol"),
+            "source_root": symbol.get("source_root"),
+        },
+        "reason": result.get("reason"),
+        "desired_state": result.get("desired_state"),
+    }
+
+
+def _item_key(payload: Dict) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True,
+                                     separators=(",", ":")).encode()).hexdigest()
+
+
+def notification_items(report: Optional[Dict], failure: Optional[str] = None,
+                       digest_value: Optional[str] = None,
+                       fault_message: Optional[str] = None) -> List[Dict]:
+    """Per-rule notification identity, ignoring lines, time, HEAD and the
+    whole-registry digest so unrelated rules never re-notify an unchanged one."""
+    items: List[Dict] = []
+    if fault_message is not None:
+        # Installation/registry faults dedupe on their own stable message.
+        items.append({
+            "kind": "managed",
+            "key": _item_key({"kind": "managed", "message": fault_message}),
+            "message": fault_message,
+        })
+    elif failure is not None:
+        items.append({
+            "kind": "failure",
+            "key": _item_key({"kind": "failure", "failure": failure}),
+            "failure": failure,
+        })
+    for result in (report or {}).get("results", []):
+        status = result.get("status")
+        if status not in NOTIFIABLE_STATUSES:
+            continue
+        if status == "VIOLATED" and not result.get("consumers"):
+            continue
+        payload = {
+            "kind": "rule",
+            "status": status,
+            "rule": _rule_identity(result),
+            "consumers": sorted({(c.get("path"), c.get("symbol"))
+                                 for c in result.get("consumers", [])}),
+            "diagnostics": sorted({(d.get("code"), d.get("path"))
+                                   for d in result.get("diagnostics", [])}),
+            "complete": bool(result.get("complete")),
+        }
+        items.append({
+            "kind": "violation" if status == "VIOLATED" else "unknown",
+            "key": _item_key(payload),
+            "status": status,
+            "result": result,
+        })
+    return items
+
+
 def _module_name(symbol):
     path = Path(symbol["path"])
     if symbol["source_root"] != ".":
@@ -63,10 +128,20 @@ def _module_name(symbol):
     return path.with_suffix("").as_posix().replace("/", ".")
 
 
+def _rule_context_line(rule: Dict) -> str:
+    symbol = rule["protected_symbol"]
+    try:
+        module_path = _module_name(symbol)
+    except ValueError:
+        module_path = symbol["path"]
+    return "{}.{}".format(module_path, symbol["symbol"])
+
+
 def hook_output(event_name: str, report: Optional[Dict], notify: bool,
                 last_status: Optional[str] = None,
                 failure: Optional[str] = None,
-                previous_notified: bool = False) -> Dict:
+                previous_notified: bool = False,
+                items: Optional[List[Dict]] = None) -> Dict:
     if event_name == "UserPromptSubmit":
         if failure is not None:
             return {"hookSpecificOutput": {
@@ -87,11 +162,16 @@ def hook_output(event_name: str, report: Optional[Dict], notify: bool,
                 "additionalContext":
                     "Spellguard: no ACTIVE rule; last check ended in {} "
                     "(上次检查未收口，这是上次状态，不是新检查结果).".format(last_status)}}
-        rule = rules[0]
-        symbol = rule["protected_symbol"]
-        module_path = _module_name(symbol)
-        context = "Spellguard: {} protects {}.{}; check runs after changes.".format(
-            rule["id"], module_path, symbol["symbol"])
+        if len(rules) == 1:
+            rule = rules[0]
+            context = "Spellguard: {} protects {}; check runs after changes.".format(
+                rule["id"], _rule_context_line(rule))
+        else:
+            listed = ", ".join(
+                "{} ({})".format(rule["id"], _rule_context_line(rule))
+                for rule in rules)
+            context = ("Spellguard: {} temporary rules: {}; check runs after "
+                       "changes.".format(len(rules), listed))
         if last_status == "VIOLATED":
             context += " 上次检查有未解决违规（上次状态，尚未重新检查）。"
         elif last_status == "ERROR":
@@ -102,21 +182,21 @@ def hook_output(event_name: str, report: Optional[Dict], notify: bool,
             "hookEventName": "UserPromptSubmit",
             "additionalContext": context}}
     if event_name == "Stop":
-        if failure is not None and notify:
+        if not notify:
+            return {}
+        if items is not None:
+            message = _aggregate_message(items)
+            return {"systemMessage": message} if message else {}
+        # Legacy callers pass no item list: keep the previous wording.
+        if failure is not None:
             violation = _violation_message(report) if report else None
             if violation is not None:
-                # Show the concrete violation evidence, and name the
-                # unresolved incompleteness in the same message.
                 reason = failure if isinstance(failure, str) else "check incomplete"
                 return {"systemMessage": "{} 检查未完成原因：{}；这不是 OPEN。"
                         .format(violation, reason)}
             return {"systemMessage":
                     "Spellguard: 检查未完成（{}）；这不是 OPEN，也不是无违规。"
                     .format(failure)}
-        if failure is not None:
-            return {}
-        if not notify:
-            return {}
         message = _violation_message(report)
         if message is not None:
             return {"systemMessage": message}
@@ -126,21 +206,66 @@ def hook_output(event_name: str, report: Optional[Dict], notify: bool,
                 event_name)}
 
 
+def _violation_line(result: Dict) -> str:
+    consumer = result["consumers"][0]
+    symbol = result["protected_symbol"]
+    try:
+        module_path = _module_name(symbol)
+    except ValueError:
+        module_path = symbol["path"]
+    location = "{}:{}".format(consumer["path"], consumer["lines"][0])
+    return ("{}: {}.{} now has an external caller at {} ({}). "
+            "Should this temporary implementation gain a cross-file "
+            "dependency? Reason: {}").format(
+        result["rule_id"], module_path, symbol["symbol"],
+        location, consumer["symbol"], result["reason"])
+
+
+def _unknown_line(result: Dict) -> str:
+    symbol = result["protected_symbol"]
+    try:
+        module_path = _module_name(symbol)
+    except ValueError:
+        module_path = symbol["path"]
+    evidence = "; ".join(
+        "{} ({})".format(d.get("code"), d.get("path") or "repository")
+        for d in result.get("diagnostics", [])) or "check incomplete"
+    return ("{}: {}.{} could not be verified ({}); this is not OPEN."
+            .format(result["rule_id"], module_path, symbol["symbol"], evidence))
+
+
+def _aggregate_message(items: List[Dict]) -> str:
+    lines: List[str] = []
+    failures: List[str] = []
+    for item in items:
+        if item["kind"] == "managed":
+            lines.append(str(item.get("message")))
+        elif item["kind"] == "failure":
+            failures.append(str(item.get("failure")))
+        elif item["kind"] == "violation":
+            lines.append(_violation_line(item["result"]))
+        elif item["kind"] == "unknown":
+            lines.append(_unknown_line(item["result"]))
+    message = " ".join(lines)
+    if lines:
+        message = "{} (全部约定与位置：运行 spellguard check 查询)".format(message)
+    if failures:
+        reason = "; ".join(failures)
+        if message:
+            message = "{} 检查未完成原因：{}；这不是 OPEN。".format(message, reason)
+        else:
+            message = ("Spellguard: 检查未完成（{}）；这不是 OPEN，也不是无违规。"
+                       .format(reason))
+    return message
+
+
 def _violation_message(report: Optional[Dict]) -> Optional[str]:
     if report is None:
         return None
     for result in report.get("results", []):
         if result.get("status") != "VIOLATED" or not result.get("consumers"):
             continue
-        consumer = result["consumers"][0]
-        symbol = result["protected_symbol"]
-        module_path = _module_name(symbol)
-        location = "{}:{}".format(consumer["path"], consumer["lines"][0])
-        return ("{}: {}.{} now has an external caller at {} ({}). "
-                "Should this temporary implementation gain a cross-file "
-                "dependency? Reason: {}").format(
-            result["rule_id"], module_path, symbol["symbol"],
-            location, consumer["symbol"], result["reason"])
+        return _violation_line(result)
     return None
 
 
@@ -150,9 +275,19 @@ def _top_diagnostic_summary(report: Dict) -> str:
                      for code, path in evidence) or "check incomplete"
 
 
+_STATE_FIELDS = ("last_key", "last_status", "last_checked_at")
+
+
 def _empty_state():
     return {"schema_version": STATE_SCHEMA, "last_key": None,
-            "last_status": None, "last_checked_at": None}
+            "last_status": None, "last_checked_at": None, "notified": []}
+
+
+def _common_state_fields_valid(state: Dict) -> bool:
+    if state.get("last_status") not in STATUSES | {None}:
+        return False
+    return all(state.get(field) is None or isinstance(state[field], str)
+               for field in _STATE_FIELDS)
 
 
 @contextlib.contextmanager
@@ -232,12 +367,25 @@ def _load_state(directory):
         return _empty_state()
     with os.fdopen(fd, "r", encoding="utf-8") as stream:
         state = json.loads(stream.read(65537))
-    if (not isinstance(state, dict) or set(state) != set(_empty_state())
-            or type(state["schema_version"]) is not int
-            or state["schema_version"] != STATE_SCHEMA
-            or state["last_status"] not in STATUSES | {None}
-            or any(state[k] is not None and not isinstance(state[k], str)
-                   for k in ("last_key", "last_checked_at"))):
+    if not isinstance(state, dict) or type(state.get("schema_version")) is not int:
+        raise HookFailure("state file has an unexpected shape")
+    if state["schema_version"] == LEGACY_STATE_SCHEMA:
+        if set(state) != {"schema_version", *_STATE_FIELDS}:
+            raise HookFailure("state file has an unexpected shape")
+        if not _common_state_fields_valid(state):
+            raise HookFailure("state file has an unexpected shape")
+        return {"schema_version": STATE_SCHEMA, "last_key": state["last_key"],
+                "last_status": state["last_status"],
+                "last_checked_at": state["last_checked_at"], "notified": []}
+    if state["schema_version"] != STATE_SCHEMA:
+        raise HookFailure("state file has an unsupported schema version")
+    if set(state) != {"schema_version", *_STATE_FIELDS, "notified"}:
+        raise HookFailure("state file has an unexpected shape")
+    if not _common_state_fields_valid(state):
+        raise HookFailure("state file has an unexpected shape")
+    notified = state["notified"]
+    if (not isinstance(notified, list)
+            or any(not isinstance(item, str) for item in notified)):
         raise HookFailure("state file has an unexpected shape")
     return state
 
@@ -284,25 +432,33 @@ def _event(event, session_id, turn_id, key, output, report, exit_code, elapsed_m
 
 def record_outcome(event: str, report: Optional[Dict], failure: Optional[str],
                    state_dir: Path, repo_root: Path, session_id: str, turn_id: str,
-                   digest_value=None, exit_code=None, elapsed_ms=0) -> Dict:
-    key = notification_key(report, failure, digest_value)
+                   digest_value=None, exit_code=None, elapsed_ms=0,
+                   fault_message: Optional[str] = None) -> Dict:
+    key = notification_key(report, failure or fault_message, digest_value)
     statuses = {r["status"] for r in (report or {}).get("results", [])}
-    status = ("VIOLATED" if "VIOLATED" in statuses else "ERROR" if failure else
-              "UNVERIFIED" if "UNVERIFIED" in statuses else
-              "RESOLVED" if "RESOLVED" in statuses else "OPEN")
+    status = ("VIOLATED" if "VIOLATED" in statuses
+              else "ERROR" if (failure is not None or fault_message is not None)
+              else "UNVERIFIED" if "UNVERIFIED" in statuses
+              else "RESOLVED" if "RESOLVED" in statuses else "OPEN")
     with _locked_state(state_dir, repo_root) as directory:
         state = _load_state(directory)
-        notify = state["last_key"] != key and (failure is not None or
-                                               status in {"VIOLATED", "UNVERIFIED"})
-        output = hook_output(event, report, notify, failure=failure)
+        items = notification_items(report, failure, digest_value, fault_message)
+        already = set(state["notified"])
+        new_items = [item for item in items if item["key"] not in already]
+        notify = bool(new_items)
+        output = hook_output(event, report, notify, failure=failure,
+                             items=items)
         # Log first: a failed log must never consume an unshown notification key.
         _append_event(directory, _event(event, session_id, turn_id, key, output,
                                        report, exit_code, elapsed_ms))
-        _write_state(directory, {"schema_version": STATE_SCHEMA, "last_key": key,
-                                "last_status": status,
-                                "last_checked_at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+        _write_state(directory, {
+            "schema_version": STATE_SCHEMA, "last_key": key,
+            "last_status": status,
+            "last_checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "notified": sorted(item["key"] for item in items)})
     return {"notify": notify, "key": key, "status": status,
-            "previous_status": state["last_status"], "output": output}
+            "previous_status": state["last_status"], "output": output,
+            "new_items": new_items}
 
 
 def same_repository(repo_root: Path, working_directory: Path) -> bool:
@@ -411,14 +567,134 @@ def _failure_output(report, error):
                        failure="{}; notification persistence is unavailable".format(error))
 
 
+def run_managed_adapter(installation_id: str, payload_source,
+                        protocol: str = "codex") -> Dict:
+    """Consume only the committed confirmation digest of an installation.
+
+    The managed Hook never confirms or recovers anything. While a confirmation
+    is pending it reports the incompleteness and does not adopt the current
+    registry. A registry that is still absent stays quiet.
+    """
+    from .installation import (
+        InstallationError, _installation_path, installation_status,
+        load_installation)
+    text = payload_source if isinstance(payload_source, str) else payload_source.read()
+    report = None
+    try:
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            raise HookFailure("host event payload must be a JSON object")
+        for field in ("hook_event_name", "cwd"):
+            if not isinstance(payload.get(field), str) or not payload[field]:
+                raise HookFailure("{} must be a non-empty string".format(field))
+        event = normalize_event(payload, protocol)
+        record = load_installation(Path(payload["cwd"]), installation_id)
+        installed_root = Path(record["repository_root"])
+        if not same_repository(installed_root, Path(payload["cwd"])):
+            raise HookFailure("event cwd is outside the installed repository")
+        guidance = None
+        if event == "UserPromptSubmit":
+            from .marking import managed_agent_guidance
+            guidance = managed_agent_guidance()
+        state_dir = _installation_path(installation_id) / "hook"
+        notice_context = {
+            "event": event,
+            "state_dir": state_dir,
+            "repo_root": installed_root,
+            "session_id": payload.get("session_id", "")
+            if isinstance(payload.get("session_id"), str) else "",
+            "turn_id": payload.get("turn_id", "")
+            if isinstance(payload.get("turn_id"), str) else "",
+            "guidance": guidance,
+        }
+        status = installation_status(installed_root)
+        if status.get("confirmation_pending"):
+            return _managed_notice(
+                "Spellguard: a confirmation is not finished; treat results as "
+                "unknown.", **notice_context)
+        notices = {
+            "unreadable":
+                "the registry could not be read; treat results as unknown.",
+            "drifted":
+                "the registry no longer matches the confirmed digest; treat "
+                "results as unknown.",
+            "unbound":
+                "a registry exists but is not bound to this installation; "
+                "treat results as unknown.",
+        }
+        state = status.get("registry_state")
+        if state in notices:
+            return _managed_notice(
+                "Spellguard: {}".format(notices[state]), **notice_context)
+        digest = record.get("adopted_registry_digest")
+        if digest is None:
+            # Bound to "no registry yet": quiet, but still teach the workflow.
+            if event == "UserPromptSubmit":
+                return {"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": guidance}}
+            # Record the clean turn so a cleared fault stops being "already
+            # notified" and can alert again if it recurs.
+            return record_outcome(
+                event="Stop", report=None, failure=None, state_dir=state_dir,
+                repo_root=installed_root,
+                session_id=notice_context["session_id"],
+                turn_id=notice_context["turn_id"],
+                exit_code=0, elapsed_ms=0)["output"]
+        output = run_adapter(str(installed_root), digest, str(state_dir),
+                             payload_source=text, protocol=protocol)
+        if event == "UserPromptSubmit":
+            # Inject the short operating rule; the maintainer sees nothing.
+            specific = output.get("hookSpecificOutput", {}).get(
+                "additionalContext")
+            context = (specific + " " + guidance if specific else guidance)
+            return {"hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": context}}
+        return output
+    except InstallationError as error:
+        return _failure_output(report, error)
+    except (HookFailure, OSError, ValueError, TypeError, KeyError) as error:
+        return _failure_output(report, error)
+
+
+def _managed_notice(message: str, *, event: str, state_dir: Path,
+                    repo_root: Path, session_id: str, turn_id: str,
+                    guidance: Optional[str] = None) -> Dict:
+    """A managed fault notice. Stop notices go through the same dedup state as
+    check notifications so an unchanged fault does not repeat."""
+    if event == "UserPromptSubmit":
+        context = message
+        if guidance:
+            context = "{} {}".format(context, guidance)
+        return {"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": context}}
+    outcome = record_outcome(
+        event="Stop", report=None, failure=None, state_dir=state_dir,
+        repo_root=repo_root, session_id=session_id, turn_id=turn_id,
+        fault_message=message, exit_code=2, elapsed_ms=0)
+    return outcome["output"]
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", required=True)
-    parser.add_argument("--registry-sha256", required=True)
-    parser.add_argument("--state-dir", required=True)
+    parser.add_argument("--repo")
+    parser.add_argument("--registry-sha256")
+    parser.add_argument("--state-dir")
+    parser.add_argument("--installation-id")
     args = parser.parse_args(argv)
-    output = run_adapter(args.repo, args.registry_sha256, args.state_dir,
-                         sys.stdin.read())
+    if args.installation_id:
+        if args.repo or args.state_dir or args.registry_sha256:
+            parser.error("--installation-id is mutually exclusive with the "
+                         "manual --repo/--state-dir/--registry-sha256 mode")
+        output = run_managed_adapter(args.installation_id, sys.stdin.read())
+    else:
+        if not (args.repo and args.registry_sha256 and args.state_dir):
+            parser.error("--repo, --state-dir and --registry-sha256 are "
+                         "required without --installation-id")
+        output = run_adapter(args.repo, args.registry_sha256, args.state_dir,
+                             sys.stdin.read())
     sys.stdout.write(json.dumps(output))
     return 0
 

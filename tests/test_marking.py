@@ -273,6 +273,21 @@ class InstructionsTest(unittest.TestCase):
         import pathlib
         self.assertTrue(True)
 
+    def test_instructions_cover_managed_flow_and_trust_separation(self):
+        code, output, _ = self._run_outside_repo(["instructions"])
+        self.assertEqual(code, 0)
+        for marker in ("installation-id", "native project/hook trust",
+                       "does not answer", "unverified", "setup --remove",
+                       "do not ask again"):
+            self.assertIn(marker, output)
+
+    def test_managed_guidance_is_short_and_host_independent(self):
+        from spellguard.marking import managed_agent_guidance
+        guidance = managed_agent_guidance()
+        self.assertIn("installation-id", guidance)
+        self.assertIn("Never confirm on your own", guidance)
+        self.assertLess(len(guidance), 400)
+
     def test_instructions_do_not_write_files(self):
         import pathlib
         tmp = pathlib.Path(tempfile.mkdtemp())

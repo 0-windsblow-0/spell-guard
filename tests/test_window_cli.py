@@ -558,5 +558,88 @@ class WindowCliTest(unittest.TestCase):
                       [d["code"] for d in report["diagnostics"]])
 
 
+class MultiRuleCliTest(unittest.TestCase):
+    """S-A03/S-A04 CLI: one snapshot evaluates every rule; an unknown rule does
+    not hide another rule's confirmed violation."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name) / "repo"
+        (self.root / "src" / "demo").mkdir(parents=True)
+        self.previous = os.getcwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, self.previous)
+        self._git("init", "-q")
+        self._git("config", "user.email", "s@example.invalid")
+        self._git("config", "user.name", "S")
+        (self.root / "src" / "demo" / "__init__.py").write_text("")
+        (self.root / "src" / "demo" / "workaround.py").write_text(
+            "def fallback():\n    return 0\n")
+        (self.root / "src" / "demo" / "use.py").write_text(
+            "from demo.workaround import fallback as f\n"
+            "def run():\n    return f()\n")
+        self.fixture = {"schema_version": 1, "rules": [
+            {"id": "TEMP-001", "classification": "temporary",
+             "lifecycle": "ACTIVE", "reason": "migration helper",
+             "desired_state": "remove later", "window": "no_external_callers",
+             "resolution_reason": None,
+             "protected_symbol": {"path": "src/demo/workaround.py",
+                                  "symbol": "fallback", "source_root": "src"}},
+            {"id": "TEMP-002", "classification": "temporary",
+             "lifecycle": "ACTIVE", "reason": "second helper",
+             "desired_state": "remove later", "window": "no_external_callers",
+             "resolution_reason": None,
+             "protected_symbol": {"path": "src/demo/missing.py",
+                                  "symbol": "gone", "source_root": "src"}},
+        ]}
+        payload = json.dumps(self.fixture, ensure_ascii=True, sort_keys=True,
+                             separators=(",", ":")).encode()
+        self.digest = hashlib.sha256(payload).hexdigest()
+        (self.root / ".spellguard").mkdir()
+        (self.root / ".spellguard" / "rules.json").write_bytes(payload)
+        self._git("add", "--all")
+        self._git("commit", "-qm", "fixture")
+
+    def _git(self, *arguments):
+        return subprocess.run(["git", "-C", str(self.root)] + list(arguments),
+                              check=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE)
+
+    def _run(self, argv):
+        import contextlib
+        import io
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = main(argv)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_check_reports_every_rule_independently(self):
+        code, output, _ = self._run(
+            ["check", "--registry-sha256", self.digest, "--format", "json"])
+        self.assertEqual(code, 2)
+        report = json.loads(output)
+        self.assertEqual([r["rule_id"] for r in report["results"]],
+                         ["TEMP-001", "TEMP-002"])
+        by_id = {r["rule_id"]: r for r in report["results"]}
+        self.assertEqual(by_id["TEMP-001"]["status"], "VIOLATED")
+        self.assertTrue(by_id["TEMP-001"]["consumers"])
+        self.assertEqual(by_id["TEMP-002"]["status"], "UNVERIFIED")
+
+    def test_context_lists_all_active_rules(self):
+        code, output, _ = self._run(
+            ["context", "--registry-sha256", self.digest, "--format", "json"])
+        self.assertEqual(code, 0)
+        report = json.loads(output)
+        self.assertEqual([r["id"] for r in report["rules"]],
+                         ["TEMP-001", "TEMP-002"])
+        text_code, text_output, _ = self._run(
+            ["context", "--registry-sha256", self.digest, "--format", "text"])
+        self.assertEqual(text_code, 0)
+        self.assertIn("2 temporary rules", text_output)
+        self.assertIn("TEMP-001", text_output)
+        self.assertIn("TEMP-002", text_output)
+
+
 if __name__ == "__main__":
     unittest.main()

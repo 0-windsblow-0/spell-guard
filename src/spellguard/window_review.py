@@ -186,14 +186,20 @@ def review_windows(root: Path, expected_digest: str) -> Tuple[Dict, int]:
     results: List[Dict] = []
     any_incomplete = not complete_extra or not digest_matches
     exit_code = 0
+    # One snapshot is analyzed once for all rules; parse/scope work is shared
+    # per side (S03). Rules stay independently evaluated.
+    current_cache: Dict = {}
+    base_cache: Dict = {}
     for rule in verified.rules:
-        current_result = check_window(current.snapshot, rule)
+        current_result = check_window(current.snapshot, rule,
+                                      analyses_cache=current_cache)
         base_result: Optional[WindowResult] = None
         base_status: Optional[str] = None
         base_diagnostics: List[Dict] = []
         if base_collected is not None:
             try:
-                base_result = check_window(base_collected.snapshot, rule)
+                base_result = check_window(base_collected.snapshot, rule,
+                                           analyses_cache=base_cache)
                 base_status = base_result.status
                 base_diagnostics = [
                     {"code": d.code, "message": "baseline: " + d.message,
@@ -297,12 +303,21 @@ def render_window_report(report: Dict, format_name: str) -> str:
                 d.get("code"), d.get("path") or "repository", d.get("message"))
                 for d in report.get("diagnostics", [])]
             return "\n".join(lines) + ("\n" if lines else "")
-        rule = rules[0]
-        path = rule["protected_symbol"]["path"].rsplit(".", 1)[0]
-        module = path.replace("/", ".")
-        return (
-            "1 temporary rule: {} protects {}.{}; run check after changes.\n"
-            .format(rule["id"], module, rule["protected_symbol"]["symbol"]))
+        if len(rules) == 1:
+            rule = rules[0]
+            path = rule["protected_symbol"]["path"].rsplit(".", 1)[0]
+            module = path.replace("/", ".")
+            return (
+                "1 temporary rule: {} protects {}.{}; run check after changes.\n"
+                .format(rule["id"], module, rule["protected_symbol"]["symbol"]))
+        lines = ["{} temporary rules:".format(len(rules))]
+        for rule in rules:
+            path = rule["protected_symbol"]["path"].rsplit(".", 1)[0]
+            module = path.replace("/", ".")
+            lines.append("  {} protects {}.{}".format(
+                rule["id"], module, rule["protected_symbol"]["symbol"]))
+        lines.append("run check after changes.")
+        return "\n".join(lines) + "\n"
     lines: List[str] = []
     for result in report.get("results", []):
         if result["status"] == "VIOLATED":

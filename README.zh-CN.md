@@ -4,7 +4,7 @@
 
 **别让临时补丁，变成永久架构。**
 
-Alpha · Local-first · MIT
+0.2.0a3 Alpha · Local-first · MIT
 
 [English](README.md) · 简体中文 · [日本語](README.ja.md)
 
@@ -39,10 +39,10 @@ Coding Agent 可以快速推进代码，但临时兼容路径也可能悄悄变�
 
 ## Quick start
 
-需要 Python 3.10+ 和 Git。在仓库根目录安装 [uv](https://docs.astral.sh/uv/getting-started/installation/) 后运行：
+需要 macOS/Linux、Python 3.10+ 和 Git。安装 [uv](https://docs.astral.sh/uv/getting-started/installation/) 后可直接运行：
 
 ```bash
-uv tool install .
+uv tool install "git+https://github.com/0-windsblow-0/spell-guard.git"
 spellguard demo
 ```
 
@@ -54,37 +54,29 @@ OPEN → 新外部调用 → VIOLATED → 移除调用 → OPEN
 
 这是一个在本地运行的合成 demo，不上传源码，也不调用 LLM。
 
-## 工作方式
+## 让 Agent 完成接入
 
-### 在 AI 会话中标记临时妥协
+安装后，在 Codex 中打开项目主 checkout，告诉它：
 
-和 AI 编码 Agent 协作时，Agent 若明确引入临时兼容方案，可通过 `spellguard propose` 先草拟一份提案，而不是等你手写规则：
+> 请在这个仓库接入 Spellguard。先读 `spellguard instructions`，预览变更并告诉我将添加哪些 Hook。我批准方案后再应用。每条临时约定都必须先问我，不能自行确认。
 
-先运行一次 `spellguard instructions`，即可得到可加入 Agent 仓库指令的宿主无关说明。Spellguard 不会替你修改这些指令文件。
+路径、安装 ID 和 digest 由 Agent 处理。你审查接入方案，并完成 Codex 原生 Hook 信任步骤；仅安装 CLI 不会激活检查。受管接入目前是 **Codex 专属的实验流程**，完整实机验收尚未完成，依赖提醒前请验证真实事件。不需要常驻服务，也不额外调用 LLM。
 
-```bash
-spellguard propose --path src/demo/adapt.py --symbol adapt --source-root src \
-  --reason "迁移期间临时保留" --desired-state "迁移后移除"
-```
+## 能帮你做什么
 
-提案只存在 Git metadata 中，`check` 不会采纳。`propose` 会打印摘要与你必须看到的摘要 digest。只有你明确确认后，Agent 才执行：
+- **预览和移除接入：** 只管理 Spellguard 自己的 Hook，保留其他 Hook。
+- **确认一次意图：** Agent 展示临时函数、保留理由和退出条件；你批准后，它完成登记、已采纳摘要更新和一次检查。
+- **保留少量约束：** 最多八条登记，包含已结束的约定，统一使用 `no_external_callers`。
+- **提供可追查证据：** 给出调用文件、行号和符号；分析不完整时明确提示，相同提醒去重。
+- **恢复中断的确认：** 重放已授权事务，不静默接受登记漂移。
 
-```bash
-spellguard confirm --proposal-sha256 <你看到的 digest>
-```
-
-摘要不匹配、草案被改或已有正式 registry 时，`confirm` 退出 2 且不改任何状态。确认是人类决定，Agent 绝不能自我确认。若已安装持久 hook，完成后需用新 digest 重新配置。
-
-
-1. 确认一个临时函数及其 `no_external_callers` 约束。
-2. 在代码变化时运行 `spellguard check`。
-3. 查看具体调用证据，决定保持隔离、接受依赖，还是移除依赖。
-
-安装一次，平时保持安静；只有已确认的临时实现开始获得新的依赖时才提醒。
+提醒指出的是值得审查的依赖，不是已确认业务缺陷。已有调用者（包括测试）同样违反 `no_external_callers`；它不是“只管新增生产调用”的策略。`OPEN` 表示未发现支持范围内的外部调用，`ACTIVE` 表示临时约定仍然有效。
 
 ## Agent integration
 
-接入 Agent hook / adapter 后，Spellguard 可以在原有开发流程里自动检查；正常情况下保持安静，只呈现有意义的变化。详见 [Agent 接入说明](docs/USAGE.md#agent-integration)。
+受管接入当前面向 **macOS/Linux 上 Codex 的主 checkout**，不支持 linked worktree。Claude Code 和 Cursor 保留手工适配器，目前只有协议测试证据。新版受管流程不沿用旧适配器的实机通过结论。
+
+接入、确认、原生信任、恢复与移除步骤见[使用说明](docs/USAGE.md#agent-integration)。高级用户仍可直接使用固定摘要的 `check` 和 `context`。
 
 ## 支持的语言
 
@@ -107,7 +99,7 @@ spellguard confirm --proposal-sha256 <你看到的 digest>
 | `spellguard context` | 向 Agent 提供已确认的意图 |
 | Agent hook / adapter | 在现有 Agent 工作流中自动检查变化 |
 
-如果只想体验当前产品，只需要关注这些接口。
+Agent 还会使用 `setup`、`status`、`propose`、`confirm` 和 `recover`；你无需记住参数。
 
 ## 实验性分析工具
 
@@ -138,7 +130,7 @@ uv tool uninstall spellguard
 python -m pip uninstall spellguard
 ```
 
-如果手工配置过 Agent hook，请先移除其中的 Spellguard 条目，再执行卸载。
+先让 Agent 预览 `spellguard setup --remove`，批准后应用移除，再卸载 CLI。手工适配器只移除其中的 Spellguard 条目。已确认规则和本地记录会保留。
 
 ## 反馈
 

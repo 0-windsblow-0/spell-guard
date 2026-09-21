@@ -13,7 +13,50 @@ python -m pip install .
 spellguard demo
 ```
 
-The README offers a shorter uv route. `uv tool install .` installs the CLI in its own environment; it does not make `spellguard` importable from an unrelated system Python. For the Python snippets and manual adapters below, use the Python interpreter in the environment where Spellguard was installed. If using uv tools, locate it under `uv tool dir` (the `spellguard/bin/python` interpreter on macOS/Linux). Do not guess a system Python path.
+The README offers a direct GitHub install with uv. Both that route and `uv tool install .` install the CLI in its own environment; neither makes `spellguard` importable from an unrelated system Python. For the Python snippets and manual adapters below, use the Python interpreter in the environment where Spellguard was installed. If using uv tools, locate it under `uv tool dir` (the `spellguard/bin/python` interpreter on macOS/Linux). Do not guess a system Python path.
+
+## Agent-managed Codex setup (experimental)
+
+This Alpha adds a managed workflow for Codex in a main checkout on macOS/Linux. Its full live-host acceptance is pending. Configuration success and protocol tests do not prove that your host executed the hooks. Linked worktrees and nested repositories are rejected; there is no daemon, model call, or merge gate.
+
+Ask your Agent to read `spellguard instructions`, then preview setup from the target Git repository:
+
+```bash
+spellguard setup --host codex --format json
+```
+
+The preview is read-only. Review the added `UserPromptSubmit` and `Stop` commands, executable path, and any existing registry that the plan will adopt. Approve only the contents you intend to trust. The Agent then runs:
+
+```text
+spellguard setup --apply <reviewed-plan-digest> --format json
+spellguard status --format json
+```
+
+Setup changes only its entries in `.codex/hooks.json` and writes local control records under `~/.spellguard/installations/`. Other hooks are preserved. Existing legacy Spellguard hooks or conflicting configuration require review rather than automatic migration. Installation uses an absolute executable path; keep that environment available until you remove or reconfigure the hook. Keep local hook paths out of public commits.
+
+Complete Codex's native project and Hook trust review separately (`/hooks` in the CLI). Never substitute a bypass flag or a manually edited trust hash. Then verify actual `UserPromptSubmit` and `Stop` events. `status` reports configuration and registry binding; this version does not automatically certify host activation (`host_verified` remains false and `last_check` is not populated). See the [official Codex Hooks documentation](https://developers.openai.com/zh-Hans/docs/hooks).
+
+### Confirm a decision, not a digest-maintenance chore
+
+The Agent gets `installation_id` from `status`, drafts a proposal, and shows the target, reason, and desired end state:
+
+```text
+spellguard propose --installation-id <id> --path src/demo/adapt.py --symbol adapt --source-root src --reason "temporary while migrating" --desired-state "remove after migration" --format json
+```
+
+Only after the maintainer explicitly approves the shown proposal may the Agent run:
+
+```text
+spellguard confirm --installation-id <id> --proposal-sha256 <reviewed-proposal-digest> --format json
+```
+
+Confirmation records the rule, updates the external adopted digest, and runs one real check. The hook command stays unchanged: there is no manual digest rebinding after each confirmation. A successful confirmation command means the decision was saved; inspect `check_exit_code`, `check_complete`, and `diagnostics` for the separate analysis result. A new function absent from HEAD can remain unverified after successful registration. Do not commit code just to hide that uncertainty.
+
+To close a rule, the Agent uses `propose --installation-id <id> --resolve TEMP-001 --reason "migration complete"` and waits for the same explicit approval before `confirm`. Removing callers returns a check to OPEN; it does not end the ACTIVE decision. The eight-registration limit includes RESOLVED entries.
+
+For interrupted confirmation, `spellguard recover --format json` replays only an existing authorized pending transaction. Interrupted setup/removal is resumed by repeating its reviewed `setup --apply` digest. Registry drift is not silently accepted. The Agent must not confirm on its own, regenerate trust to silence an error, or treat unknown as safe.
+
+For removal, preview `spellguard setup --remove --format json`, approve it, then apply its plan digest with `setup --apply`. Only owned hooks are removed; confirmed rules and local records remain. Verify a new host turn no longer invokes Spellguard before uninstalling the CLI.
 
 ## Start with the demo
 
@@ -47,9 +90,11 @@ The following is a **synthetic example**, not a rule to apply to an arbitrary pr
 }
 ```
 
-Only zero or one rule is supported. `source_root` is `src` or `.`. With `src`, the function must be in an ordinary package with the required `__init__.py` files. With `.`, the protected file must be directly at the repository root. It must be a top-level named function, not a method or a re-export. Unknown registry fields, duplicate keys, invalid paths, and unsupported identities are rejected.
+Up to eight registrations are supported, including RESOLVED entries. For Python, `source_root` is `.` or a single repository-relative directory such as `src` or `tools`. A flat module such as `tools/legacy.py` can use `source_root="tools"`; nested package directories require the corresponding `__init__.py` files. With `.`, the protected file must be directly at the repository root. It must be a top-level named function, not a method or a re-export. Unknown registry fields, duplicate keys, invalid paths, and unsupported identities are rejected. This is static module identity, not execution of arbitrary import-path setup.
 
-## Confirm once, then check
+## Advanced: fixed-digest checks
+
+The following is the manual route. Managed Codex confirmation above updates its own adopted digest after explicit approval.
 
 From the target repository, with Spellguard's virtual environment active, compute the digest **once after confirming the rule contents**:
 
@@ -93,7 +138,7 @@ Known callers are preserved alongside unknowns. An unavailable baseline makes th
 
 These are intentionally narrow static identities. Related ambiguous imports, function-value passing, dynamic dispatch, reflection, macros, and runtime-only consumers are not treated as definite callers; depending on the language and syntax, Spellguard either reports an incomplete result or leaves the reference outside its declared coverage.
 
-### Propose and confirm a temporary rule with an AI agent
+### Manual proposal and confirmation (without managed setup)
 
 When an AI assistant deliberately introduces a temporary compatibility
 compromise, it may draft a proposal instead of asking you to hand-write the
@@ -106,7 +151,7 @@ instructions used by your Agent:
 spellguard instructions
 ```
 
-Spellguard does not edit AGENTS.md, CLAUDE.md, or host configuration itself.
+`instructions` only prints text; it does not edit Agent instruction files or host configuration. The separate managed `setup --apply` command does write its reviewed hook changes.
 
 ```bash
 spellguard propose --path src/demo/adapt.py --symbol adapt \
@@ -129,7 +174,7 @@ new digest printed by `confirm`.
 
 ## Agent integration
 
-The source distribution includes three manual adapters. Keep the scripts together: Claude Code and Cursor reuse the core in the Codex script.
+Use the managed Codex workflow above for the new experimental setup path. The source distribution also includes three manual adapters. Keep the scripts together: Claude Code and Cursor reuse the core in the Codex script.
 
 | Host | Script | Input events | Verification |
 | --- | --- | --- | --- |
@@ -145,7 +190,7 @@ python scripts/codex_repair_window.py --help
 
 The adapter takes fixed absolute `--repo`, `--state-dir`, and `--registry-sha256` arguments. The state directory must be outside the repository and use a real path without symbolic links. Configure the host to pass the corresponding events from the table to its script. Use the absolute path to the Python interpreter where Spellguard is installed. Setup is manual; the demo does not configure your host.
 
-Project hook loading requires host trust. Verify actual events in your host before relying on reminders. Current host evidence covers Codex CLI 0.153.4 in a primary checkout on macOS. Linked worktrees are unsupported; interrupted turns, crashes, and sub-agents are not covered by normal turn-end triggering. See the [Codex hook documentation](https://learn.chatgpt.com/docs/hooks) for host configuration.
+Project hook loading requires host trust. Verify actual events in your host before relying on reminders. Older fixed-digest adapter evidence covers Codex CLI 0.153.4 in a primary checkout on macOS; it does not establish live-host acceptance for the new managed workflow. Linked worktrees are unsupported; interrupted turns, crashes, and sub-agents are not covered by normal turn-end triggering. See the [Codex hook documentation](https://developers.openai.com/zh-Hans/docs/hooks) for host configuration.
 
 Normal Stop checks are quiet. Changed violations or failures surface a message, and unchanged evidence is deduplicated. Prompt context preserves the distinction between the last check and a fresh result. The Codex and Claude adapters do not request automatic continuation. The current Cursor adapter maps Stop notices to `followup_message`, which can request another Agent turn; it is experimental and should not be treated as a verified quiet notification. None of these adapters edits your source or rules.
 
@@ -153,7 +198,7 @@ Local state/logs contain check and notification metadata, not prompts or transcr
 
 ## Stop and uninstall
 
-The demo ends without leaving a hook installed. If you configured hooks manually, remove only the Spellguard entries from the two events and verify that a new turn no longer invokes the adapter. Keep your other hooks intact.
+The demo ends without leaving a hook installed. For managed setup, preview `spellguard setup --remove` and apply the approved plan before uninstalling. If you configured hooks manually, remove only the Spellguard entries from the two events. Verify that a new turn no longer invokes the adapter. Keep your other hooks intact.
 
 For a uv tool installation, run `uv tool uninstall spellguard`. For pip, from the active virtual environment:
 

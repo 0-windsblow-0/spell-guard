@@ -4,7 +4,7 @@
 
 **一時的な回避策を、恒久的なアーキテクチャにしない。**
 
-Alpha · Local-first · MIT
+0.2.0a3 Alpha · Local-first · MIT
 
 [English](README.md) · [简体中文](README.zh-CN.md) · 日本語
 
@@ -39,10 +39,10 @@ Coding Agent は開発を速めますが、一時的な互換経路が気付か�
 
 ## Quick start
 
-Python 3.10+ と Git が必要です。リポジトリのルートで、[uv](https://docs.astral.sh/uv/getting-started/installation/)をインストールしてから実行します。
+macOS/Linux、Python 3.10+、Git が必要です。[uv](https://docs.astral.sh/uv/getting-started/installation/)をインストールしてから直接実行できます。
 
 ```bash
-uv tool install .
+uv tool install "git+https://github.com/0-windsblow-0/spell-guard.git"
 spellguard demo
 ```
 
@@ -54,37 +54,29 @@ OPEN → 新しい外部呼び出し → VIOLATED → 呼び出しを削除 → 
 
 この合成 demo はローカルで動作し、ソースコードをアップロードせず、LLM も呼び出しません。
 
-## 仕組み
+## セットアップは Agent に任せる
 
-### AI セッションでの一時的な妥協のマーク
+インストール後、Codex でプロジェクトのメイン checkout を開き、次のように依頼します。
 
-AI エージェントが一時的な互換対応を意図的に導入した場合、規則を手書きで待つ代わりに `spellguard propose` で草案を出せます：
+> このリポジトリに Spellguard を設定してください。まず `spellguard instructions` を読み、変更をプレビューして追加する Hook を示してください。私が承認した後に適用してください。一時的な制約は必ず私に確認し、自己承認しないでください。
 
-最初に `spellguard instructions` を一度実行すると、Agent のリポジトリ指示へ追加できるホスト非依存の説明が表示されます。Spellguard がそれらの指示ファイルを自動編集することはありません。
+パス、インストール ID、digest は Agent が扱います。あなたは設定案を確認し、Codex のネイティブな Hook 信頼操作を行います。CLI のインストールだけではチェックは有効になりません。この管理型セットアップは **Codex 専用の実験的なワークフロー**です。実ホストでの一連の検証はまだ完了していないため、通知を頼りにする前に実際のイベントを確認してください。常駐サービスや追加の LLM 呼び出しはありません。
 
-```bash
-spellguard propose --path src/demo/adapt.py --symbol adapt --source-root src \
-  --reason "移行中の一時対応" --desired-state "移行後に削除"
-```
+## できること
 
-草案は Git metadata のみに保存され、`check` は採用しません。出力された要約と digest をあなたが確認し、明示的に承認した場合にのみ、エージェントは次を実行します：
+- **設定のプレビューと解除：** 他の Hook を保ち、Spellguard 自身の Hook だけを管理します。
+- **意図を一度確認：** Agent が一時的な関数、理由、終了条件を提示します。承認後に登録、採用済み digest の更新、チェックを実行します。
+- **少数の制約を維持：** 終了済みを含む最大八件の登録で、`no_external_callers` のみを使用します。
+- **追跡できる根拠：** 呼び出し元のファイル、行、シンボルを示します。不完全な解析は明示し、同じ通知は重複させません。
+- **中断した確認の復旧：** 承認済みの処理を再開し、登録内容の意図しない変更を黙認しません。
 
-```bash
-spellguard confirm --proposal-sha256 <確認した digest>
-```
-
-digest 不一致、草案変更、既存 registry がある場合は `confirm` は exit 2 で何も変更しません。確認は人間の判断であり、エージェントが自己確認してはなりません。永続 hook を使っている場合は確認後に新しい digest で再設定してください。
-
-
-1. 一時的な関数と、その `no_external_callers` 制約を確認します。
-2. コードの変更時に `spellguard check` を実行します。
-3. 具体的な呼び出しの根拠を見て、独立性を保つか、依存を受け入れるか、削除するかを判断します。
-
-一度インストールすれば、確認済みの一時的な実装に新しい依存が増えるまで、Spellguard は静かに待機します。
+通知は確認すべき依存を示すもので、業務上の不具合の断定ではありません。既存の呼び出し元（テストを含む）も `no_external_callers` に違反します。「新規の本番コードの呼び出しだけ」を対象とする制約ではありません。`OPEN` は対応範囲で外部呼び出しが見つからない状態、`ACTIVE` は一時的な制約が引き続き有効な状態です。
 
 ## Agent integration
 
-Agent hook / adapter と連携すると、通常の開発フローを保ったまま Spellguard が自動で確認できます。通常は静かに動作し、意味のある変化だけを提示します。詳しくは [Agent 連携ガイド](docs/USAGE.md#agent-integration)を参照してください。
+管理型セットアップは現在、**macOS/Linux 上の Codex のメイン checkout** を対象とします。linked worktree は非対応です。Claude Code と Cursor には手動アダプターがあり、検証はプロトコルテストのみです。新しい管理型フローの実機検証を、旧アダプターの結果で代用することはできません。
+
+設定、確認、ネイティブな信頼操作、復旧、解除は[利用ガイド](docs/USAGE.md#agent-integration)を参照してください。上級者は固定 digest を使う `check` と `context` も利用できます。
 
 ## 対応言語
 
@@ -107,7 +99,7 @@ Agent hook / adapter と連携すると、通常の開発フローを保った�
 | `spellguard context` | 確認済みの意図を Agent に提供 |
 | Agent hook / adapter | 既存の Agent ワークフロー内で変更を自動チェック |
 
-現在の製品を試すために必要なのは、これらのインターフェースだけです。
+Agent は `setup`、`status`、`propose`、`confirm`、`recover` も使います。引数を覚える必要はありません。
 
 ## 実験的な分析ツール
 
@@ -138,7 +130,7 @@ uv tool uninstall spellguard
 python -m pip uninstall spellguard
 ```
 
-Agent hook を手動設定した場合は、アンインストール前に Spellguard の項目を削除してください。
+先に Agent に `spellguard setup --remove` のプレビューを依頼し、承認後に解除してから CLI をアンインストールしてください。手動アダプターでは Spellguard の項目だけを削除します。確認済みの規則とローカル記録は保持されます。
 
 ## フィードバック
 

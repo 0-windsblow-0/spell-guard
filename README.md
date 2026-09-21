@@ -4,7 +4,7 @@
 
 **Keep temporary workarounds from becoming permanent architecture.**
 
-Alpha · Local-first · MIT
+0.2.0a3 Alpha · Local-first · MIT
 
 English · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
 
@@ -39,10 +39,10 @@ Coding Agents move quickly, but a temporary compatibility path can quietly becom
 
 ## Quick start
 
-Requires Python 3.10+ and Git. From the repository root, with [uv](https://docs.astral.sh/uv/getting-started/installation/) installed:
+Requires Python 3.10+ and Git on macOS/Linux. With [uv](https://docs.astral.sh/uv/getting-started/installation/) installed:
 
 ```bash
-uv tool install .
+uv tool install "git+https://github.com/0-windsblow-0/spell-guard.git"
 spellguard demo
 ```
 
@@ -54,44 +54,29 @@ OPEN → new external caller → VIOLATED → remove caller → OPEN
 
 The synthetic demo runs locally and does not upload source code or call an LLM.
 
-## How it works
+## Let your Agent handle the setup
 
-### Marking a temporary compromise in an AI session
+After installing, open your project's main checkout in Codex and ask:
 
-Working with an AI coding agent? When the agent deliberately introduces a
-temporary compatibility compromise, it can draft a proposal instead of
-waiting for you to hand-write a rule:
+> Set up Spellguard in this repository. Read `spellguard instructions`, preview the changes, and show me which hooks will be added. Apply the reviewed plan after my approval. Never confirm a temporary rule without asking me.
 
-Run `spellguard instructions` once to print the host-neutral instruction block
-you can add to your Agent's repository instructions. Spellguard does not edit
-those files for you.
+The Agent handles paths, installation IDs, and digests. You review the setup and complete Codex's native hook trust step; installing the CLI alone does not activate checks. The managed setup is an **experimental Codex-only workflow**. Its full live-host acceptance is still pending; verify real events before relying on reminders. There is no background daemon or extra LLM call.
 
-```bash
-spellguard propose --path src/demo/adapt.py --symbol adapt --source-root src \
-  --reason "temporary while migrating" --desired-state "remove after migration"
-```
+## What you get
 
-The proposal lives in Git metadata only and does not affect `check`. Only
-after you explicitly confirm does `spellguard confirm` promote it to the
-official registry:
+- **Preview and remove setup:** manage Spellguard's own hooks while preserving other hooks.
+- **Confirm intent once:** the Agent proposes a temporary function, its reason, and its exit condition. After your approval, it records the decision, updates the adopted digest, and runs a check.
+- **Keep a small set of constraints:** up to eight registrations, including resolved ones, all using `no_external_callers`.
+- **See actionable evidence:** caller file, line, and symbol; incomplete analysis stays visible. Unchanged notices are deduplicated.
+- **Recover interrupted confirmation:** replay the authorized transaction without silently accepting registry drift.
 
-```bash
-spellguard confirm --proposal-sha256 <digest shown to you>
-```
-
-The agent asks; you confirm. Nothing is auto-confirmed.
-
-## Existing checks
-
-1. Confirm a temporary function and its `no_external_callers` constraint.
-2. Run `spellguard check` as the code changes.
-3. Review concrete caller evidence and decide whether to keep, accept, or remove the dependency.
-
-Install once. Spellguard stays quiet until a confirmed temporary decision starts gaining new dependencies.
+A reminder identifies a dependency to review, not a business defect. Existing callers—including tests—also violate `no_external_callers`; it is not a “new production callers only” policy. `OPEN` means no supported external caller was found, while `ACTIVE` means the temporary decision still applies.
 
 ## Agent integration
 
-Spellguard can run through Agent hooks and adapters so checks happen automatically while you keep using your normal coding workflow. In normal operation it stays quiet and surfaces only relevant changes. See [Agent integration](docs/USAGE.md#agent-integration).
+Managed setup currently targets **Codex in a main checkout on macOS/Linux**. Linked worktrees are unsupported. Claude Code and Cursor retain manual adapters with protocol-test evidence only. The managed workflow does not inherit the older adapter's live-host validation.
+
+See the [usage guide](docs/USAGE.md#agent-integration) for setup, confirmation, native trust, recovery, and removal. Advanced users can keep using fixed-digest `check` and `context` directly.
 
 ## Supported languages
 
@@ -114,7 +99,7 @@ Alpha currently focuses on direct static references. Exact syntax coverage is do
 | `spellguard context` | Provide confirmed intent to an Agent |
 | Agent hooks / adapters | Check changes inside the existing Agent workflow |
 
-To experience the current product, these are the only interfaces you need.
+The Agent also uses `setup`, `status`, `propose`, `confirm`, and `recover`; you do not need to memorize their arguments.
 
 ## Experimental analysis tools
 
@@ -145,7 +130,7 @@ uv tool uninstall spellguard
 python -m pip uninstall spellguard
 ```
 
-If you configured an Agent hook manually, remove its Spellguard entry before uninstalling.
+First ask your Agent to preview `spellguard setup --remove` and apply the approved removal. Then uninstall the CLI. For manual adapters, remove only their Spellguard entries. Confirmed rules and local records are retained.
 
 ## Feedback
 
